@@ -30,7 +30,7 @@ npm install --save-dev https://github.com/Negar-Hashemi/js-sanitizer.git
   "name": "test-project",
   "version": "1.0.0",
   "devDependencies": {
-    "js-sanitizer": "https://github.com/Negar-Hashemi/js-sanitizer.git"
+    "js-sanitizer": "git+https://github.com/Negar-Hashemi/js-sanitizer.git"
   }
 }
 ```
