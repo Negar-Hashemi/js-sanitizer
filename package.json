@@ -4,7 +4,7 @@
   "description": "Automatically skips or enables JS tests based on environment conditions",
   "main": "index.js",
   "scripts": {
-    "postinstall": "node ./setup.js"
+    "prepare": "node ./setup.js"
   },
   "dependencies": {
     "jest-docblock": "^29.7.0"
