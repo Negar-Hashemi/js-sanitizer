@@ -4,7 +4,7 @@
   "description": "Automatically skips or enables JS tests based on environment conditions",
   "main": "index.js",
   "scripts": {
-    "prepare": "node ./setup.js"
+    "postinstall": "node ./setup.js"
   },
   "bin": {
     "js-sanitizer-setup": "./setup.js"
