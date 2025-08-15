@@ -89,6 +89,7 @@ function updateBabelConfig(filePath) {
 }
 
 (function main() {
+  console.log(`###########SETUP JS-SANITIZER#################`);
   const framework = detectTestingFramework();
   if (!framework) {
     console.log("No supported testing framework detected (jest, vitest, mocha). Skipping setup.");
