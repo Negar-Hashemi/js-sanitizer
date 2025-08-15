@@ -88,7 +88,7 @@ During test execution, skipped tests will log messages like:
 ```
 
 ## Notes
-a
+
 - Browser detection works if a browser-like environment is available (e.g., `jsdom` in Vitest).  
 - Node and OS detection always work in Node.js environments.  
 - Skipped tests and warnings are saved in `sanitize-tests.log` with timestamps for easy review.
