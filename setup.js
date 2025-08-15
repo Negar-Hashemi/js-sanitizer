@@ -28,44 +28,67 @@ function findBabelConfig() {
 }
 
 function backupFile(filePath) {
-  if (fs.existsSync(filePath)) {
-    const backupPath = filePath + '.bak';
-    fs.copyFileSync(filePath, backupPath);
-    console.log(`Backup created: ${backupPath}`);
-  }
+  const backupPath = filePath + '.bak';
+  fs.copyFileSync(filePath, backupPath);
+  console.log(`Backup created: ${backupPath}`);
 }
 
-function updateBabelConfig(filePath) {
-  let config = {};
+function updateJsBabelConfig(filePath) {
+  backupFile(filePath);
 
-  if (fs.existsSync(filePath)) {
-    backupFile(filePath);
+  let content = fs.readFileSync(filePath, 'utf8');
 
-    try {
-      if (filePath.endsWith('.js')) {
-        config = require(filePath);
+  // Add plugin entry if not present
+  if (!content.includes('"babel-sanitize-tests"') && !content.includes("'babel-sanitize-tests'")) {
+    // Simple regex to insert plugin before closing ]
+    const pluginInsertRegex = /(plugins\s*:\s*\[)([^]*?)(\])/m;
+    if (pluginInsertRegex.test(content)) {
+      content = content.replace(pluginInsertRegex, (_, start, existing, end) => {
+        const newPlugins = existing.trim().length ? existing.trim() + ', "babel-sanitize-tests"' : '"babel-sanitize-tests"';
+        return `${start}${newPlugins}${end}`;
+      });
+    } else {
+      // If no plugins array found, add it
+      const moduleExportsRegex = /module\.exports\s*=\s*{([^]*?)}/m;
+      if (moduleExportsRegex.test(content)) {
+        content = content.replace(moduleExportsRegex, (_, body) => {
+          return `module.exports = {${body.trim()},\n  plugins: ["babel-sanitize-tests"],\n  comments: true\n}`;
+        });
       } else {
-        config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        console.log(`Cannot automatically edit ${filePath}. Please add "babel-sanitize-tests" manually.`);
+        return;
       }
-    } catch (err) {
-      console.warn(`Failed to load ${filePath}. Starting with empty config.`);
-      config = {};
     }
   }
 
-  config.plugins = config.plugins || [];
-  if (!config.plugins.includes("sanitize-tests")) {
-    config.plugins.push("sanitize-tests");
-    console.log(`Added "sanitize-tests" plugin to Babel config.`);
+  // Ensure comments: true
+  if (!/comments\s*:\s*true/.test(content)) {
+    content = content.replace(/module\.exports\s*=\s*{/, "module.exports = {\n  comments: true,");
   }
 
+  fs.writeFileSync(filePath, content, 'utf8');
+  console.log(`Updated Babel JS config: ${filePath}`);
+}
+
+function updateJsonBabelConfig(filePath) {
+  backupFile(filePath);
+
+  let config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  config.plugins = config.plugins || [];
+  if (!config.plugins.includes("babel-sanitize-tests")) {
+    config.plugins.push("babel-sanitize-tests");
+    console.log(`Added "babel-sanitize-tests" plugin to ${path.basename(filePath)}`);
+  }
   config.comments = true;
+  fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf8');
+}
 
-  // Always write as JS module
-  const jsContent = `module.exports = ${JSON.stringify(config, null, 2)};\n`;
-  fs.writeFileSync(path.resolve(process.cwd(), 'babel.config.js'), jsContent);
-
-  console.log(`Babel config written to babel.config.js`);
+function updateBabelConfig(filePath) {
+  if (filePath.endsWith('.js')) {
+    updateJsBabelConfig(filePath);
+  } else {
+    updateJsonBabelConfig(filePath);
+  }
 }
 
 (function main() {
@@ -78,5 +101,5 @@ function updateBabelConfig(filePath) {
   const babelConfigPath = findBabelConfig();
   updateBabelConfig(babelConfigPath);
 
-  console.log(`Detected ${framework}. Babel config updated with sanitize-tests plugin.`);
+  console.log(`Detected ${framework}. Babel config updated with "babel-sanitize-tests" plugin.`);
 })();
