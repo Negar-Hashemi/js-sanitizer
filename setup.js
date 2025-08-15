@@ -35,10 +35,14 @@ function findBabelConfig() {
 function backupFile(filePath) {
   if (fs.existsSync(filePath)) {
     const backupPath = filePath + '.bak';
-    fs.copyFileSync(filePath, backupPath);
-    console.log(`Backup created: ${backupPath}`);
+    if (!fs.existsSync(backupPath)) {
+      fs.copyFileSync(filePath, backupPath);
+      console.log(`Backup created: ${backupPath}`);
+    }
   }
 }
+
+// ------------------ Babel Config ------------------
 
 function createDefaultBabelConfig(filePath) {
   const content = `module.exports = {
@@ -57,11 +61,13 @@ function updateJsBabelConfig(filePath) {
   backupFile(filePath);
   let content = fs.readFileSync(filePath, 'utf8');
 
+  // Add plugin if not present
   if (!content.includes('"js-sanitizer"') && !content.includes("'js-sanitizer'")) {
     const pluginInsertRegex = /(plugins\s*:\s*\[)([^]*?)(\])/m;
     if (pluginInsertRegex.test(content)) {
       content = content.replace(pluginInsertRegex, (_, start, existing, end) => {
-        const newPlugins = existing.trim().length ? existing.trim() + ', "module:js-sanitizer"' : '"module:js-sanitizer"';
+        const trimmed = existing.trim();
+        const newPlugins = trimmed.length ? trimmed + ', "module:js-sanitizer"' : '"module:js-sanitizer"';
         return `${start}${newPlugins}${end}`;
       });
     } else {
@@ -77,6 +83,7 @@ function updateJsBabelConfig(filePath) {
     }
   }
 
+  // Ensure comments: true
   if (!/comments\s*:\s*true/.test(content)) {
     content = content.replace(/module\.exports\s*=\s*{/, "module.exports = {\n  comments: true,");
   }
@@ -129,15 +136,14 @@ function checkBabelVersion() {
   const versionMatch = babelVersionString.match(/\d+\.\d+\.\d+/);
   if (!versionMatch) return;
 
-  const [major, minor, patch] = versionMatch[0].split('.').map(Number);
+  const [major, minor] = versionMatch[0].split('.').map(Number);
   const needsUpdate =
     major < MIN_BABEL_VERSION[0] ||
     (major === MIN_BABEL_VERSION[0] && minor < MIN_BABEL_VERSION[1]);
 
   if (needsUpdate) {
-    console.warn(`[WARNING] Your @babel/core version (${versionMatch[0]}) is too old. Please update to >= ${MIN_BABEL_VERSION.join('.')}`);
+    console.warn(`[WARNING] Your @babel/core version (${versionMatch[0]}) is too old. Updating to >= ${MIN_BABEL_VERSION.join('.')}`);
     try {
-      console.log("Attempting to update @babel/core and @babel/preset-env automatically...");
       execSync(`npm install --save-dev @babel/core@^7.22.0 @babel/preset-env@^7.22.0`, { stdio: 'inherit' });
     } catch (err) {
       console.error("Automatic update failed. Please update manually.");
