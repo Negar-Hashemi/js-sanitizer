@@ -28,38 +28,44 @@ function findBabelConfig() {
 }
 
 function backupFile(filePath) {
-  const backupPath = filePath + '.bak';
-  fs.copyFileSync(filePath, backupPath);
-  console.log(`Backup created: ${backupPath}`);
+  if (fs.existsSync(filePath)) {
+    const backupPath = filePath + '.bak';
+    fs.copyFileSync(filePath, backupPath);
+    console.log(`Backup created: ${backupPath}`);
+  }
 }
 
 function updateBabelConfig(filePath) {
   let config = {};
 
   if (fs.existsSync(filePath)) {
-    // Backup first
     backupFile(filePath);
 
-    if (filePath.endsWith('.js')) {
-      console.log(`Detected .js config (${filePath}). Manual addition may be required.`);
-      return; // skip automatic editing for .js files to avoid breaking functions
-    } else {
-      config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    try {
+      if (filePath.endsWith('.js')) {
+        config = require(filePath);
+      } else {
+        config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      }
+    } catch (err) {
+      console.warn(`Failed to load ${filePath}. Starting with empty config.`);
+      config = {};
     }
   }
 
   config.plugins = config.plugins || [];
   if (!config.plugins.includes("sanitize-tests")) {
     config.plugins.push("sanitize-tests");
-    console.log(`Added "sanitize-tests" plugin to ${path.basename(filePath)}`);
+    console.log(`Added "sanitize-tests" plugin to Babel config.`);
   }
 
-  if (config.comments !== true) {
-    config.comments = true;
-    console.log(`Set comments = true in ${path.basename(filePath)}`);
-  }
+  config.comments = true;
 
-  fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf8');
+  // Always write as JS module
+  const jsContent = `module.exports = ${JSON.stringify(config, null, 2)};\n`;
+  fs.writeFileSync(path.resolve(process.cwd(), 'babel.config.js'), jsContent);
+
+  console.log(`Babel config written to babel.config.js`);
 }
 
 (function main() {
