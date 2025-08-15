@@ -41,7 +41,7 @@ function createDefaultBabelConfig(filePath) {
   presets: [
     ["@babel/preset-env", { targets: { node: "current" } }]
   ],
-  plugins: ["js-sanitizer"],
+  plugins: ["module:js-sanitizer"],
   comments: true
 };
 `;
