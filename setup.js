@@ -39,29 +39,26 @@ function updateJsBabelConfig(filePath) {
   let content = fs.readFileSync(filePath, 'utf8');
 
   // Add plugin entry if not present
-  if (!content.includes('"babel-sanitize-tests"') && !content.includes("'babel-sanitize-tests'")) {
-    // Simple regex to insert plugin before closing ]
+  if (!content.includes('"js-sanitizer"') && !content.includes("'js-sanitizer'")) {
     const pluginInsertRegex = /(plugins\s*:\s*\[)([^]*?)(\])/m;
     if (pluginInsertRegex.test(content)) {
       content = content.replace(pluginInsertRegex, (_, start, existing, end) => {
-        const newPlugins = existing.trim().length ? existing.trim() + ', "babel-sanitize-tests"' : '"babel-sanitize-tests"';
+        const newPlugins = existing.trim().length ? existing.trim() + ', "js-sanitizer"' : '"js-sanitizer"';
         return `${start}${newPlugins}${end}`;
       });
     } else {
-      // If no plugins array found, add it
       const moduleExportsRegex = /module\.exports\s*=\s*{([^]*?)}/m;
       if (moduleExportsRegex.test(content)) {
         content = content.replace(moduleExportsRegex, (_, body) => {
-          return `module.exports = {${body.trim()},\n  plugins: ["babel-sanitize-tests"],\n  comments: true\n}`;
+          return `module.exports = {${body.trim()},\n  plugins: ["js-sanitizer"],\n  comments: true\n}`;
         });
       } else {
-        console.log(`Cannot automatically edit ${filePath}. Please add "babel-sanitize-tests" manually.`);
+        console.log(`Cannot automatically edit ${filePath}. Please add "js-sanitizer" manually.`);
         return;
       }
     }
   }
 
-  // Ensure comments: true
   if (!/comments\s*:\s*true/.test(content)) {
     content = content.replace(/module\.exports\s*=\s*{/, "module.exports = {\n  comments: true,");
   }
@@ -75,9 +72,9 @@ function updateJsonBabelConfig(filePath) {
 
   let config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   config.plugins = config.plugins || [];
-  if (!config.plugins.includes("babel-sanitize-tests")) {
-    config.plugins.push("babel-sanitize-tests");
-    console.log(`Added "babel-sanitize-tests" plugin to ${path.basename(filePath)}`);
+  if (!config.plugins.includes("js-sanitizer")) {
+    config.plugins.push("js-sanitizer");
+    console.log(`Added "js-sanitizer" plugin to ${path.basename(filePath)}`);
   }
   config.comments = true;
   fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf8');
@@ -101,5 +98,5 @@ function updateBabelConfig(filePath) {
   const babelConfigPath = findBabelConfig();
   updateBabelConfig(babelConfigPath);
 
-  console.log(`Detected ${framework}. Babel config updated with "babel-sanitize-tests" plugin.`);
+  console.log(`Detected ${framework}. Babel config updated with "js-sanitizer" plugin.`);
 })();
