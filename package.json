@@ -3,11 +3,8 @@
   "version": "1.0.0",
   "description": "Automatically skips or enables JS tests based on environment conditions",
   "main": "index.js",
-  "bin": {
-    "sanitize-tests-setup": "./setup.js"
-  },
   "scripts": {
-    "postinstall": "sanitize-tests-setup"
+  "postinstall": "node ./setup.js"
   },
   "dependencies": {
     "jest-docblock": "^29.7.0"
