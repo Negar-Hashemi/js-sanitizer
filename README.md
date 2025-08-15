@@ -9,7 +9,7 @@ Works with **Jest**, **Mocha**, and **Vitest**.
 Install via GitHub URL:
 
 ```bash
-npm install --save-dev github:your-username/js-sanitizer
+npm install --save-dev https://github.com/Negar-Hashemi/js-sanitizer.git
 ```
 
 
@@ -27,10 +27,10 @@ npm install --save-dev github:your-username/js-sanitizer
 ## Example package.json for your project
 ```bash
 {
-  "name": "my-test-project",
+  "name": "test-project",
   "version": "1.0.0",
   "devDependencies": {
-    "js-sanitizer": "github:your-username/js-sanitizer"
+    "js-sanitizer": "https://github.com/Negar-Hashemi/js-sanitizer.git"
   }
 }
 ```
@@ -88,7 +88,7 @@ During test execution, skipped tests will log messages like:
 ```
 
 ## Notes
-
+a
 - Browser detection works if a browser-like environment is available (e.g., `jsdom` in Vitest).  
 - Node and OS detection always work in Node.js environments.  
 - Skipped tests and warnings are saved in `sanitize-tests.log` with timestamps for easy review.
