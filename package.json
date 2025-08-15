@@ -7,6 +7,9 @@
     "prepare": "node ./setup.js",
     "postinstall": "node ./setup.js"
   },
+  "bin": {
+    "js-sanitizer-setup": "./setup.js"
+  },
   "dependencies": {
     "jest-docblock": "^29.7.0"
   },
