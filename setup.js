@@ -9,7 +9,7 @@ const configFileNames = [
   '.babelrc.json'
 ];
 
-const MIN_BABEL_VERSION = [7, 22, 0]; // minimum supported version
+const MIN_BABEL_VERSION = [7, 22, 0];
 
 // ------------------ Helpers ------------------
 
@@ -54,7 +54,7 @@ function createDefaultBabelConfig(filePath) {
 };
 `;
   fs.writeFileSync(filePath, content, 'utf8');
-  console.log(`No Babel config found. Created default ${path.basename(filePath)} with js-sanitizer plugin.`);
+  console.log(`Created default Babel config: ${path.basename(filePath)} with js-sanitizer plugin.`);
 }
 
 function updateJsBabelConfig(filePath) {
@@ -155,20 +155,25 @@ function setupVitestConfig() {
   const hostRoot = process.cwd();
   const viteConfigPath = path.join(hostRoot, 'vite.config.js');
 
+  // Ensure vite-plugin-babel is installed
+  try {
+    require.resolve('vite-plugin-babel');
+  } catch (err) {
+    console.log('Installing vite-plugin-babel...');
+    execSync('npm install --save-dev vite-plugin-babel', { stdio: 'inherit' });
+  }
+
   let configContent = '';
   const babelPluginImport = `import babel from 'vite-plugin-babel';`;
 
   if (fs.existsSync(viteConfigPath)) {
-    // Update existing Vite config
     configContent = fs.readFileSync(viteConfigPath, 'utf8');
 
     if (!configContent.includes('vite-plugin-babel')) {
-      // Insert Babel plugin import
       configContent = `${babelPluginImport}\n${configContent}`;
     }
 
     if (!/plugins\s*:\s*\[.*babel.*\]/s.test(configContent)) {
-      // Add babel to plugins array
       configContent = configContent.replace(/plugins\s*:\s*\[([^\]]*)\]/s, (match, inner) => {
         const newInner = inner.trim().length ? inner + ', babel({ babelConfig: "./babel.config.js" })' : 'babel({ babelConfig: "./babel.config.js" })';
         return `plugins: [${newInner}]`;
@@ -176,9 +181,8 @@ function setupVitestConfig() {
     }
 
     fs.writeFileSync(viteConfigPath, configContent, 'utf8');
-    console.log('✅ Updated existing vite.config.js with Babel plugin for Vitest');
+    console.log('Updated existing vite.config.js with Babel plugin for Vitest');
   } else {
-    // Create new vite.config.js
     const newConfig = `
 import { defineConfig } from 'vite';
 import babel from 'vite-plugin-babel';
@@ -192,15 +196,14 @@ export default defineConfig({
 });
 `;
     fs.writeFileSync(viteConfigPath, newConfig.trim(), 'utf8');
-    console.log('✅ Created vite.config.js with Babel plugin for Vitest');
+    console.log('Created vite.config.js with Babel plugin for Vitest');
   }
 }
 
 // ------------------ Main ------------------
 
 (function main() {
-  console.log(`########### SETUP JS-SANITIZER #################`);
-
+  
   const framework = detectTestingFramework();
   if (!framework) {
     console.log("No supported testing framework detected (jest, vitest, mocha). Skipping setup.");
