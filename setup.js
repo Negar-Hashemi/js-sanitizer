@@ -24,13 +24,29 @@ function findBabelConfig() {
     const fullPath = path.resolve(process.cwd(), file);
     if (fs.existsSync(fullPath)) return fullPath;
   }
-  return path.resolve(process.cwd(), 'babel.config.js'); // default if none exists
+  // If none exists, return default path for new config
+  return path.resolve(process.cwd(), 'babel.config.js');
 }
 
 function backupFile(filePath) {
-  const backupPath = filePath + '.bak';
-  fs.copyFileSync(filePath, backupPath);
-  console.log(`Backup created: ${backupPath}`);
+  if (fs.existsSync(filePath)) {
+    const backupPath = filePath + '.bak';
+    fs.copyFileSync(filePath, backupPath);
+    console.log(`Backup created: ${backupPath}`);
+  }
+}
+
+function createDefaultBabelConfig(filePath) {
+  const content = `module.exports = {
+  presets: [
+    ["@babel/preset-env", { targets: { node: "current" } }]
+  ],
+  plugins: ["js-sanitizer"],
+  comments: true
+};
+`;
+  fs.writeFileSync(filePath, content, 'utf8');
+  console.log(`No Babel config found. Created default ${path.basename(filePath)} with js-sanitizer plugin.`);
 }
 
 function updateJsBabelConfig(filePath) {
@@ -81,6 +97,11 @@ function updateJsonBabelConfig(filePath) {
 }
 
 function updateBabelConfig(filePath) {
+  if (!fs.existsSync(filePath)) {
+    createDefaultBabelConfig(filePath);
+    return;
+  }
+
   if (filePath.endsWith('.js')) {
     updateJsBabelConfig(filePath);
   } else {
@@ -89,7 +110,8 @@ function updateBabelConfig(filePath) {
 }
 
 (function main() {
-  console.log(`###########SETUP JS-SANITIZER#################`);
+  console.log(`########### SETUP JS-SANITIZER #################`);
+
   const framework = detectTestingFramework();
   if (!framework) {
     console.log("No supported testing framework detected (jest, vitest, mocha). Skipping setup.");
