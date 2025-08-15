@@ -210,6 +210,8 @@ export default defineConfig({
     return;
   }
 
+  console.log(##########+framework+"############)
+
   const babelConfigPath = findBabelConfig();
   updateBabelConfig(babelConfigPath);
 
