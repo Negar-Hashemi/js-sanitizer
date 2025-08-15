@@ -1,0 +1,33 @@
+{
+  "name": "babel-plugin-sanitize-tests",
+  "version": "1.0.0",
+  "description": "Automatically skips or enables JS tests based on environment conditions",
+  "main": "index.js",
+  "bin": {
+    "sanitize-tests-setup": "./setup.js"
+  },
+  "scripts": {
+    "postinstall": "sanitize-tests-setup"
+  },
+  "dependencies": {
+    "jest-docblock": "^29.7.0"
+  },
+  "peerDependencies": {
+    "@babel/core": "^7.0.0"
+  },
+  "keywords": [
+    "babel-plugin",
+    "jest",
+    "vitest",
+    "mocha",
+    "skip",
+    "conditional",
+    "testing"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/babel-plugin-sanitize-tests.git"
+  },
+  
+  "license": "MIT"
+}
