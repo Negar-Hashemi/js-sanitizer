@@ -1,10 +1,10 @@
 {
-  "name": "babel-plugin-sanitize-tests",
+  "name": "js-sanitizer",
   "version": "1.0.0",
   "description": "Automatically skips or enables JS tests based on environment conditions",
   "main": "index.js",
   "scripts": {
-  "postinstall": "node ./setup.js"
+    "postinstall": "node ./setup.js"
   },
   "dependencies": {
     "jest-docblock": "^29.7.0"
@@ -23,8 +23,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/babel-plugin-sanitize-tests.git"
+    "url": "https://github.com/Negar-Hashemi/js-sanitizer.git"
   },
-  
   "license": "MIT"
 }
