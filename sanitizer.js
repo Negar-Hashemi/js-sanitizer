@@ -1,157 +1,201 @@
-const fs = require('fs');
-const path = require('path');
-const { extract, parse } = require('jest-docblock');
+// sanitizer.js
+// Babel plugin: js-sanitizer
+// Skips tests (test/it/describe) based on docblock tags.
 
-module.exports = function(babel, options = {}) {
+const fs = require("fs");
+const path = require("path");
+const { extract, parse } = require("jest-docblock");
+
+module.exports = function jsSanitizer(babel) {
   const { types: t } = babel;
 
-  const currentPlatform = process.platform;
-  const currentNodeVersion = parseInt(process.versions.node.split('.')[0], 10);
-  const currentBrowsers = detectBrowser();
+  const currentPlatform = process.platform; // "darwin" | "win32" | "linux"
+  const currentNodeVersion = parseInt(process.versions.node.split(".")[0], 10);
+  const currentBrowser = detectBrowser();
 
-  const logFilePath = path.resolve(process.cwd(), 'sanitize-tests.log');
+  const reportDir = fs.existsSync(path.resolve(process.cwd(), "reports"))
+    ? path.resolve(process.cwd(), "reports")
+    : process.cwd();
+  const logFilePath = path.join(reportDir, "sanitize-tests.log");
 
   const tagHandlers = [
-    { 
-      tag: 'skipOnBrowser',
-      shouldSkip: (value) => parseList(value).includes(currentBrowsers),
-      format: (value) => `@skipOnBrowser ${value}`
-    },
-    { 
-      tag: 'enableOnBrowser',
-      shouldSkip: (value) => !parseList(value).includes(currentBrowsers),
-      format: (value) => `@enableOnBrowser ${value}`
-    },
-    { 
-      tag: 'skipOnOS',
-      shouldSkip: (value) => parseList(value).includes(currentPlatform),
-      format: (value) => `@skipOnOS ${value}`
-    },
     {
-      tag: 'enabledOnOS',
-      shouldSkip: (value) => !parseList(value).includes(currentPlatform),
-      format: (value) => `@enabledOnOS ${value}`
-    },
-    {
-      tag: 'skipOnNodeVersion',
-      shouldSkip: (value) => parseVersionList(value).includes(currentNodeVersion),
-      format: (value) => `@skipOnNodeVersion ${value}`
-    },
-    {
-      tag: 'enabledOnNodeVersion',
-      shouldSkip: (value) => !parseVersionList(value).includes(currentNodeVersion),
-      format: (value) => `@enabledOnNodeVersion ${value}`
-    },
-    {
-      tag: 'skipForNodeRange',
+      tag: "skipOnBrowser",
       shouldSkip: (value) => {
-        const { minVersions, maxVersions } = parseKeyValue(value);
-        const min = minVersions ? parseInt(minVersions, 10) : -Infinity;
-        const max = maxVersions ? parseInt(maxVersions, 10) : Infinity;
+        const list = parseList(value);
+        return currentBrowser && list.includes(currentBrowser);
+      },
+      format: (value) => `@skipOnBrowser ${value}`,
+    },
+    {
+      tag: "enabledOnBrowser",
+      shouldSkip: (value) => {
+        const list = parseList(value);
+        // Skip if we can’t detect a browser, or current not in list
+        return !currentBrowser || !list.includes(currentBrowser);
+      },
+      format: (value) => `@enabledOnBrowser ${value}`,
+    },
+    {
+      tag: "skipOnOS",
+      shouldSkip: (value) => parseList(value).includes(currentPlatform),
+      format: (value) => `@skipOnOS ${value}`,
+    },
+    {
+      tag: "enabledOnOS",
+      shouldSkip: (value) => !parseList(value).includes(currentPlatform),
+      format: (value) => `@enabledOnOS ${value}`,
+    },
+    {
+      tag: "skipOnNodeVersion",
+      shouldSkip: (value) => parseVersionList(value).includes(currentNodeVersion),
+      format: (value) => `@skipOnNodeVersion ${value}`,
+    },
+    {
+      tag: "enabledOnNodeVersion",
+      shouldSkip: (value) => !parseVersionList(value).includes(currentNodeVersion),
+      format: (value) => `@enabledOnNodeVersion ${value}`,
+    },
+    {
+      tag: "skipForNodeRange",
+      shouldSkip: (value) => {
+        const { min, max } = parseRange(value);
         return currentNodeVersion >= min && currentNodeVersion <= max;
       },
-      format: (value) => `@skipForNodeRange ${value}`
+      format: (value) => `@skipForNodeRange ${value}`,
     },
     {
-      tag: 'enabledForNodeRange',
+      tag: "enabledForNodeRange",
       shouldSkip: (value) => {
-        const { minVersions, maxVersions } = parseKeyValue(value);
-        const min = minVersions ? parseInt(minVersions, 10) : -Infinity;
-        const max = maxVersions ? parseInt(maxVersions, 10) : Infinity;
+        const { min, max } = parseRange(value);
         return currentNodeVersion < min || currentNodeVersion > max;
       },
-      format: (value) => `@enabledForNodeRange ${value}`
-    }
+      format: (value) => `@enabledForNodeRange ${value}`,
+    },
   ];
 
+  // --- Helpers ---
+
   function detectBrowser() {
-    if (typeof navigator === 'undefined') return 'Node';
+    if (process?.env?.JS_SANITIZER_BROWSER) return process.env.JS_SANITIZER_BROWSER;
+    if (typeof navigator === "undefined" || !navigator.userAgent) return null;
     const ua = navigator.userAgent;
     if (ua.includes("Firefox")) return "Firefox";
     if (ua.includes("Edg")) return "Edge";
     if (ua.includes("Chrome")) return "Chrome";
-    if (ua.includes("Safari")) return "Safari";
-    return "Unknown";
-  }
-
-  function shouldSkipTest(pragmas) {
-    for (const { tag, shouldSkip, format } of tagHandlers) {
-      const value = pragmas[tag];
-      if (!value) continue;
-
-      if (shouldSkip(value)) {
-        return format(value);
-      }
-    }
+    if (ua.includes("Safari") && !ua.includes("Chrome") && !ua.includes("Chromium")) return "Safari";
     return null;
   }
 
   function parseList(str) {
-    return str.split(',').map(s => s.trim());
+    return String(str || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
 
   function parseVersionList(str) {
-    return str ? parseList(str).map(v => parseInt(v, 10)).filter(v => !isNaN(v)) : [];
+    return parseList(str)
+      .map((v) => parseInt(v, 10))
+      .filter((v) => Number.isFinite(v));
   }
 
-  function parseKeyValue(str) {
-    const result = {};
-    str.split(',').forEach(pair => {
-      const [key, value] = pair.split('=').map(s => s.trim());
-      if (key && value) result[key] = value;
-    });
-    return result;
+  function parseRange(str) {
+    const pairs = {};
+    String(str || "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .forEach((pair) => {
+        const [k, v] = pair.split("=").map((x) => x.trim());
+        if (k && v) pairs[k] = v;
+      });
+    return {
+      min: pairs.min ? parseInt(pairs.min, 10) : -Infinity,
+      max: pairs.max ? parseInt(pairs.max, 10) : Infinity,
+    };
   }
 
-  function logMessage(message) {
-    const timestamp = new Date().toISOString();
-    fs.appendFileSync(logFilePath, `[${timestamp}] ${message}\n`, 'utf8');
+  function logMessage(msg) {
+    const ts = new Date().toISOString();
+    try {
+      fs.appendFileSync(logFilePath, `[${ts}] ${msg}\n`, "utf8");
+    } catch {
+      /* ignore logging errors */
+    }
   }
+
+  function nearestBlockComments(path) {
+    const here = path.node.leadingComments || [];
+    if (here.length) return here;
+    return path.parent?.leadingComments || [];
+  }
+
+  function baseTestName(node) {
+    if (t.isIdentifier(node)) return node.name;
+    if (t.isMemberExpression(node) && t.isIdentifier(node.object)) {
+      return node.object.name;
+    }
+    return null;
+  }
+
+  function forceSkip(node) {
+    if (t.isIdentifier(node)) {
+      return t.memberExpression(node, t.identifier("skip"));
+    }
+    if (t.isMemberExpression(node) && t.isIdentifier(node.object)) {
+      return t.memberExpression(node.object, t.identifier("skip"));
+    }
+    return node;
+  }
+
+  // --- Core ---
 
   return {
+    name: "js-sanitizer",
     visitor: {
-      CallExpression(path) {
-        const callee = path.get('callee');
-        const calleeName = callee.node.name;
+      CallExpression(path, state) {
+        const filename = state.file.opts.filename || "";
+        const calleeNode = path.node.callee;
+        const baseName = baseTestName(calleeNode);
 
-        if (!['test', 'it', 'describe'].includes(calleeName)) return;
+        if (!baseName || !["test", "it", "describe"].includes(baseName)) return;
+        if (t.isMemberExpression(calleeNode) && t.isIdentifier(calleeNode.property, { name: "skip" })) {
+          return; // already skipped
+        }
 
         const args = path.node.arguments;
-        const testName = args[0]?.type === 'StringLiteral' ? args[0].value : '(unnamed)';
-        const fileName = path.hub?.file?.opts?.filename || '(unknown file)';
-
-        const comments = path.node.leadingComments || path.parent.leadingComments || [];
+        const testName = args[0]?.type === "StringLiteral" ? args[0].value : "(unnamed)";
+        const comments = nearestBlockComments(path);
         if (!comments.length) return;
 
         for (const comment of comments) {
-          if (!comment.value.startsWith('*')) continue;
-
+          if (comment.type !== "CommentBlock") continue;
           try {
-            const makeDocblock = "/*" + comment.value + "*/";
-            const docblock = extract(makeDocblock);
+            const raw = "/*" + comment.value + "*/";
+            const docblock = extract(raw);
             const pragmas = parse(docblock);
 
-            const skipReason = shouldSkipTest(pragmas);
-            if (skipReason) {
-              const newCallee = t.memberExpression(
-                t.identifier(calleeName),
-                t.identifier('skip')
-              );
-              callee.replaceWith(newCallee);
+            for (const { tag, shouldSkip, format } of tagHandlers) {
+              const value = pragmas[tag];
+              if (!value) continue;
+              if (shouldSkip(value)) {
+                const newCallee = forceSkip(calleeNode);
+                path.get("callee").replaceWith(newCallee);
 
-              const message = `[SKIPPING] ${calleeName}("${testName}") in ${fileName} due to ${skipReason}`;
-              console.log(message);
-              logMessage(message);
-
-              return;
+                const msg = `[SKIPPING] ${baseName}("${testName}") in ${filename} due to ${format(value)}`;
+                console.warn(msg);
+                logMessage(msg);
+                return;
+              }
             }
           } catch (err) {
-            const warnMessage = `[WARN] Failed to process comment in ${fileName}: ${err.message}`;
-            console.warn(warnMessage);
-            logMessage(warnMessage);
+            const warn = `[WARN] Failed to process comment in ${filename}: ${err.message}`;
+            console.warn(warn);
+            logMessage(warn);
           }
         }
-      }
-    }
+      },
+    },
   };
 };
