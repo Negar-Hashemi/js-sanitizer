@@ -1,6 +1,4 @@
-// index.js
-const sanitizer = require('./sanitizer.js');
-console.log(`########### INDEX JS-SANITIZER #################`);
-module.exports = function (babel, options) {
-  return sanitizer(babel, options);
-};
+if (process.env.JS_SANITIZER_DEBUG) {
+  console.log("########### INDEX JS-SANITIZER #################");
+}
+module.exports = require("./sanitizer.js");
