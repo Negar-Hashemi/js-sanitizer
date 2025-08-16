@@ -5,11 +5,11 @@ const { execSync } = require('child_process');
 
 const configFileNames = [
   'babel.config.js',
+  'babel.config.cjs',
   '.babelrc',
   '.babelrc.json'
 ];
-
-const MIN_BABEL_VERSION = [7, 22, 0]; // minimum supported version
+const MIN_BABEL_VERSION = [7, 22, 0];
 
 // ------------------ Helpers ------------------
 function detectTestingFramework() {
@@ -40,7 +40,25 @@ function backupFile(filePath) {
   }
 }
 
-// ------------------ Babel Config ------------------
+// ------------------ Babel ------------------
+function ensureBabelInstalled() {
+  const pkg = require(path.resolve(process.cwd(), 'package.json'));
+  if (
+    !pkg.devDependencies?.["@babel/core"] &&
+    !pkg.dependencies?.["@babel/core"]
+  ) {
+    console.log("Installing @babel/core and @babel/preset-env...");
+    try {
+      execSync(
+        "npm install --save-dev @babel/core@^7.22.0 @babel/preset-env@^7.22.0",
+        { stdio: "inherit" }
+      );
+    } catch (err) {
+      console.error("Failed to install Babel. Please install manually.");
+    }
+  }
+}
+
 function createDefaultBabelConfig() {
   const esModule = isESModuleProject();
   const fileName = esModule ? 'babel.config.cjs' : 'babel.config.js';
@@ -67,7 +85,7 @@ function findBabelConfig() {
   return null;
 }
 
-// ------------------ Vitest Config ------------------
+// ------------------ Vitest ------------------
 function findVitestConfig() {
   const possibleFiles = [
     'vitest.config.js',
@@ -89,10 +107,10 @@ import { defineConfig } from 'vite';
 import babel from 'vite-plugin-babel';
 
 export default defineConfig({
-  plugins: [babel()],
+  plugins: [babel({ babelConfig: './babel.config.js' })],
   test: {
     globals: true,
-    environment: 'jsdom' // default, can override per-file with docblock
+    environment: 'jsdom' // default
   }
 });
 `;
@@ -101,7 +119,7 @@ export default defineConfig({
     backupFile(configPath);
     let content = fs.readFileSync(configPath, 'utf8');
     if (!content.includes("vite-plugin-babel") && !content.includes("js-sanitizer")) {
-      content += `\n// Added by js-sanitizer setup\nplugins.push(babel());\n`;
+      content += `\n// Added by js-sanitizer setup\nplugins.push(babel({ babelConfig: './babel.config.js' }));\n`;
       fs.writeFileSync(configPath, content, 'utf8');
       console.log(`Updated existing Vitest config: ${path.basename(configPath)}`);
     } else {
@@ -157,9 +175,13 @@ function checkBabelVersion() {
     return;
   }
 
+  ensureBabelInstalled();
+
   // Babel
   let babelConfigPath = findBabelConfig();
-  if (!babelConfigPath) babelConfigPath = createDefaultBabelConfig();
+  if (!babelConfigPath || !fs.existsSync(babelConfigPath)) {
+    babelConfigPath = createDefaultBabelConfig();
+  }
 
   checkBabelVersion();
 
