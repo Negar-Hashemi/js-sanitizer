@@ -6,8 +6,8 @@ const { execSync } = require('child_process');
 const configFileNames = [
   'babel.config.js',
   'babel.config.cjs',
-  '.babelrc',
-  '.babelrc.json'
+  // '.babelrc',
+  // '.babelrc.json'
 ];
 const MIN_BABEL_VERSION = [7, 22, 0];
 
@@ -78,11 +78,105 @@ function createDefaultBabelConfig() {
 }
 
 function findBabelConfig() {
-  for (const file of configFileNames) {
+  const allFiles = [...configFileNames];
+  for (const file of allFiles) {
     const fullPath = path.resolve(process.cwd(), file);
     if (fs.existsSync(fullPath)) return fullPath;
   }
-  return null;
+  return null; // none exist
+}
+
+// ------------------ Update Babel Config ------------------
+function updateBabelConfig(filePath) {
+  backupFile(filePath);
+
+  if (filePath.endsWith('.js') || filePath.endsWith('.cjs')) {
+    let content = fs.readFileSync(filePath, 'utf8');
+
+    // Add plugin if not present
+    if (!content.includes('"js-sanitizer"') && !content.includes("'js-sanitizer'")) {
+      const pluginsRegex = /(plugins\s*:\s*\[)([^]*?)(\])/m;
+      if (pluginsRegex.test(content)) {
+        content = content.replace(pluginsRegex, (_, start, existing, end) => {
+          const trimmed = existing.trim();
+          const newPlugins = trimmed.length ? trimmed + ', "module:js-sanitizer"' : '"module:js-sanitizer"';
+          return `${start}${newPlugins}${end}`;
+        });
+      } else {
+        // fallback if plugins not defined
+        const moduleExportsRegex = /module\.exports\s*=\s*{([^]*?)}/m;
+        if (moduleExportsRegex.test(content)) {
+          content = content.replace(moduleExportsRegex, (_, body) => {
+            return `module.exports = {${body.trim()},\n  plugins: ["module:js-sanitizer"],\n  comments: true\n}`;
+          });
+        } else {
+          console.log(`Cannot automatically edit ${filePath}. Please add "module:js-sanitizer" manually.`);
+          return;
+        }
+      }
+    }
+
+    // Ensure comments: true
+    if (!/comments\s*:\s*true/.test(content)) {
+      content = content.replace(/module\.exports\s*=\s*{/, "module.exports = {\n  comments: true,");
+    }
+
+    fs.writeFileSync(filePath, content, 'utf8');
+    console.log(`Updated Babel JS config: ${filePath}`);
+
+  } else {
+    // JSON / .babelrc
+    let config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    config.plugins = config.plugins || [];
+    if (!config.plugins.includes("module:js-sanitizer")) {
+      config.plugins.push("module:js-sanitizer");
+      console.log(`Added "js-sanitizer" plugin to ${path.basename(filePath)}`);
+    }
+    config.comments = true;
+    fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf8');
+    console.log(`Updated Babel JSON config: ${filePath}`);
+  }
+}
+
+function updateBabelConfig(filePath) {
+  const isJS = filePath.endsWith('.js') || filePath.endsWith('.cjs');
+
+  if (isJS) {
+    // Load the config
+    let config;
+    try {
+      config = require(filePath);
+    } catch (err) {
+      console.error(`Failed to load ${filePath}:`, err);
+      return;
+    }
+
+    config.plugins = config.plugins || [];
+    if (!config.plugins.includes("module:js-sanitizer")) {
+      config.plugins.push("module:js-sanitizer");
+      console.log(`Added "module:js-sanitizer" to ${path.basename(filePath)}`);
+    } else {
+      console.log(`"module:js-sanitizer" already present in ${path.basename(filePath)}`);
+    }
+
+    config.comments = true;
+
+    // Write back
+    const content = `module.exports = ${JSON.stringify(config, null, 2)};\n`;
+    fs.writeFileSync(filePath, content, 'utf8');
+  } else {
+    // JSON config
+    let config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    config.plugins = config.plugins || [];
+    if (!config.plugins.includes("module:js-sanitizer")) {
+      config.plugins.push("module:js-sanitizer");
+      console.log(`Added "module:js-sanitizer" to ${path.basename(filePath)}`);
+    } else {
+      console.log(`"module:js-sanitizer" already present in ${path.basename(filePath)}`);
+    }
+    config.comments = true;
+    fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf8');
+  }
 }
 
 // ------------------ Vitest ------------------
@@ -167,7 +261,7 @@ function checkBabelVersion() {
 
 // ------------------ Main ------------------
 (function main() {
-  console.log(`########### SETUP JS-SANITIZER #################`);
+  console.log(`############# SETUP JS-SANITIZER #################`);
 
   const framework = detectTestingFramework();
   if (!framework) {
@@ -179,9 +273,12 @@ function checkBabelVersion() {
 
   // Babel
   let babelConfigPath = findBabelConfig();
-  if (!babelConfigPath || !fs.existsSync(babelConfigPath)) {
-    babelConfigPath = createDefaultBabelConfig();
-  }
+if (!babelConfigPath) {
+  babelConfigPath = createDefaultBabelConfig(); 
+} else {
+  updateBabelConfig(babelConfigPath);
+}
+
 
   checkBabelVersion();
 
