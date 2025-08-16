@@ -1,32 +1,54 @@
 {
   "name": "js-sanitizer",
-  "version": "1.0.0",
-  "description": "Automatically skips or enables JS tests based on environment conditions",
+  "version": "0.1.0",
+  "description": "Babel plugin that conditionally skips tests (test/it/describe) based on docblock tags like @skipOnOS, @enabledOnBrowser, etc.",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "sanitizer.js",
+    "setup.js",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "postinstall": "node ./setup.js"
-  },
-  "bin": {
-    "js-sanitizer-setup": "./setup.js"
-  },
-  "dependencies": {
-    "jest-docblock": "^29.7.0"
-  },
-  "peerDependencies": {
-    "@babel/core": "^7.0.0"
+    "postinstall": "node ./setup.js || echo \"[js-sanitizer] setup skipped\"",
+    "lint": "eslint .",
+    "test": "echo \"(no tests yet)\""
   },
   "keywords": [
     "babel-plugin",
     "jest",
     "vitest",
     "mocha",
+    "test",
     "skip",
-    "conditional",
-    "testing"
+    "docblock",
+    "sanitizer"
   ],
+  "author": "Negar Hashemi",
+  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Negar-Hashemi/js-sanitizer.git"
+    "url": "git+https://github.com/Negar-Hashemi/js-sanitizer.git"
   },
-  "license": "MIT"
+  "bugs": {
+    "url": "https://github.com/Negar-Hashemi/js-sanitizer/issues"
+  },
+  "homepage": "https://github.com/Negar-Hashemi/js-sanitizer#readme",
+  "engines": {
+    "node": ">=14"
+  },
+  "peerDependencies": {
+    "@babel/core": ">=7.22.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.0",
+    "@babel/preset-env": "^7.25.0",
+    "jest-docblock": "^29.7.0",
+    "eslint": "^9.5.0"
+  }
 }
