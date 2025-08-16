@@ -7,13 +7,19 @@ Works with **Jest**, **Mocha**, and **Vitest**.
 
 ## Installation
 
-Install via GitHub URL:
-
+### If `js-sanitizer` is not in your package.json
+Add it as a dev dependency:
 ```bash
-npm install --save-dev https://github.com/Negar-Hashemi/js-sanitizer.git
+npm install --save-dev git+https://github.com/Negar-Hashemi/js-sanitizer.git
 ```
 
-After installation, the setup script will run automatically and configure your project.
+### If `js-sanitizer` is already in your package.json
+Simply install dependencies:
+```bash
+npm install
+```
+
+In both cases, the `setup.js` script will run automatically (via `postinstall`) and configure Babel + your test framework.
 
 ---
 
@@ -24,12 +30,12 @@ After installation, the setup script will run automatically and configure your p
   - `@skipOnNodeVersion`, `@enabledOnNodeVersion`
   - `@skipForNodeRange`, `@enabledForNodeRange`
   - `@skipOnBrowser`, `@enabledOnBrowser` (works in browser-like environments)
-- Works automatically with Babel using a **postinstall setup**.
+- Works automatically with Babel using the **postinstall setup**.
 - Logs all skipped tests to console **and** `sanitize-tests.log`.
 
 ---
 
-## Example package.json for your project
+## Example package.json
 
 ```json
 {
@@ -45,7 +51,7 @@ After installation, the setup script will run automatically and configure your p
 
 ## Writing Annotated Tests
 
-Add docblock comments immediately above your test blocks to control skipping behavior.
+Add docblock comments immediately above your test blocks to control skipping behavior:
 
 ```js
 /**
@@ -101,7 +107,7 @@ The `setup.js` script automatically configures the correct integration:
 
 ### Jest
 - Ensures Babel is active using `babel-jest`.
-- If no Jest config exists, creates a minimal `jest.config.js` with Babel support.
+- If no Jest config exists, creates a minimal `jest.config.js`.
 - If you already have a Jest config, it won’t overwrite it — just make sure `transform` includes `babel-jest`.
 
 ### Mocha
@@ -111,8 +117,6 @@ The `setup.js` script automatically configures the correct integration:
 ### Vitest
 - Creates `vitest.setup.js` to register Babel before tests run.
 - Updates your `package.json` to include this file under `vitest.setupFiles`.
-
-This way, `js-sanitizer` works out of the box across all three frameworks.
 
 ---
 
