@@ -1,15 +1,29 @@
 #!/usr/bin/env node
 /**
- * js-sanitizer setup
- * - Works from the consumer project root using INIT_CWD
- * - Wires Babel plugin, Jest (babel-jest), Mocha (@babel/register), Vitest (@babel/register)
- * - Idempotent + conservative
+ * js-sanitizer setup (Jest + Mocha + Vitest)
+ * - Operates in consumer project (INIT_CWD)
+ * - Ensures Babel config exists, includes plugin, and keeps ESM (modules:false)
+ * - Wires Jest (babel-jest), Mocha (@babel/register), Vitest (vite-plugin-babel)
+ * - Idempotent, conservative edits; clear warnings
  */
 const fs = require('fs');
 const path = require('path');
 
-// Resolve the REAL project root (npm/yarn supply INIT_CWD)
 const ROOT = process.env.INIT_CWD || process.cwd();
+const PKG_PATH = path.join(ROOT, 'package.json');
+const PLUGIN_NAME = 'module:js-sanitizer';
+
+const exists = (p) => { try { return fs.existsSync(p); } catch { return false; } };
+const read   = (p) => fs.readFileSync(p, 'utf8');
+const readJSON = (p) => { try { return JSON.parse(read(p)); } catch { return null; } };
+const writeJSON = (p, o) => fs.writeFileSync(p, JSON.stringify(o, null, 2) + '\n');
+const writeIfChanged = (p, s) => {
+  const str = String(s);
+  if (exists(p) && read(p) === str) return false;
+  fs.writeFileSync(p, str);
+  return true;
+};
+const ensureArray = (x) => (Array.isArray(x) ? x : (x == null ? [] : [x]));
 const log = (m) => console.log(`[js-sanitizer setup] ${m}`);
 
 if (process.env.JS_SANITIZER_SKIP_SETUP === '1') {
@@ -17,105 +31,134 @@ if (process.env.JS_SANITIZER_SKIP_SETUP === '1') {
   process.exit(0);
 }
 
-const PLUGIN_NAME = 'module:js-sanitizer';
-const PKG_PATH = path.join(ROOT, 'package.json');
-const JEST_FILES = [
-  'jest.config.js',
-  'jest.config.cjs',
-  // We avoid automatic edits for .mjs/.ts to prevent risky rewrites
-  // 'jest.config.mjs',
-  // 'jest.config.ts'
-].map(f => path.join(ROOT, f));
-const MOCHA_RC = path.join(ROOT, '.mocharc.json');
-const BABEL_REGISTER = path.join(ROOT, 'babel.register.js');
-const VITEST_SETUP = path.join(ROOT, 'vitest.setup.js');
-
-const exists = (p) => { try { return fs.existsSync(p); } catch { return false; } };
-const readJSON = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
-const writeJSON = (p, o) => fs.writeFileSync(p, JSON.stringify(o, null, 2) + '\n');
-const writeIfChanged = (p, s) => {
-  const str = String(s);
-  if (exists(p) && fs.readFileSync(p, 'utf8') === str) return false;
-  fs.writeFileSync(p, str);
-  return true;
-};
-const ensureArray = (x) => (Array.isArray(x) ? x : (x == null ? [] : [x]));
 const pkg = readJSON(PKG_PATH) || {};
-const hasAnyDep = (name) =>
-  !!(pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.peerDependencies?.[name]);
+const isESMProject = pkg.type === 'module';
+const hasDep = (name) => !!(pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.peerDependencies?.[name]);
 
 log(`Using project root: ${ROOT}`);
 
-// ----------------- 1) Ensure Babel config includes plugin -----------------
+/* ----------------------------------------
+ * 1) Ensure Babel config + modules:false
+ * --------------------------------------*/
 (function ensureBabelConfig() {
-  const jsonPaths = ['.babelrc', '.babelrc.json'].map(f => path.join(ROOT, f));
-  const jsPath = path.join(ROOT, 'babel.config.js');
+  // Prefer .cjs in ESM projects to avoid "module is not defined"
+  const targetBabelFile = isESMProject ? 'babel.config.cjs' : 'babel.config.js';
+  const targetPath = path.join(ROOT, targetBabelFile);
 
+  // If ESM project has babel.config.js with CJS export, rename to .cjs
+  const jsPath = path.join(ROOT, 'babel.config.js');
+  if (isESMProject && exists(jsPath)) {
+    const src = read(jsPath);
+    if (/module\.exports\s*=/.test(src)) {
+      const cjsPath = path.join(ROOT, 'babel.config.cjs');
+      if (!exists(cjsPath)) {
+        fs.renameSync(jsPath, cjsPath);
+        log('Renamed babel.config.js → babel.config.cjs for ESM compatibility');
+      }
+    }
+  }
+
+  // Update JSON configs if present
+  const jsonPaths = ['.babelrc', '.babelrc.json'].map(f => path.join(ROOT, f));
   for (const p of jsonPaths) {
     if (!exists(p)) continue;
     const cfg = readJSON(p) || {};
+    // presets
+    cfg.presets = ensureArray(cfg.presets);
+    const idx = cfg.presets.findIndex(e => (Array.isArray(e) ? e[0] : e) === '@babel/preset-env');
+    if (idx === -1) {
+      cfg.presets.push(["@babel/preset-env", { targets: { node: "current" }, modules: false }]);
+    } else {
+      const entry = cfg.presets[idx];
+      if (Array.isArray(entry)) {
+        const opts = entry[1] || {};
+        if (opts.modules !== false) opts.modules = false;
+        if (!opts.targets) opts.targets = { node: "current" };
+        cfg.presets[idx] = ["@babel/preset-env", opts];
+      } else {
+        cfg.presets[idx] = ["@babel/preset-env", { targets: { node: "current" }, modules: false }];
+      }
+    }
+    // plugins
     cfg.plugins = ensureArray(cfg.plugins);
-    if (!cfg.plugins.includes(PLUGIN_NAME)) {
-      cfg.plugins.push(PLUGIN_NAME);
-      writeJSON(p, cfg);
-      log(`Added ${PLUGIN_NAME} to ${path.basename(p)}`);
-    } else {
-      log(`${PLUGIN_NAME} already present in ${path.basename(p)}`);
-    }
+    if (!cfg.plugins.includes(PLUGIN_NAME)) cfg.plugins.push(PLUGIN_NAME);
+    writeJSON(p, cfg);
+    log(`Updated ${path.basename(p)} with ${PLUGIN_NAME} and modules:false`);
     return;
   }
 
-  if (exists(jsPath)) {
-    let src = fs.readFileSync(jsPath, 'utf8');
-    if (src.includes(PLUGIN_NAME)) {
-      log(`${PLUGIN_NAME} already present in ${path.basename(jsPath)}`);
-      return;
+  // Update code-based config if present; else create a minimal one
+  if (exists(targetPath)) {
+    let src = read(targetPath);
+
+    // Ensure plugins includes our plugin
+    if (!src.includes(PLUGIN_NAME)) {
+      const pluginsArrayRegex = /plugins\s*:\s*\[([\s\S]*?)\]/m;
+      if (pluginsArrayRegex.test(src)) {
+        src = src.replace(pluginsArrayRegex, (m, inner) => {
+          const trimmed = inner.trim();
+          const needsComma = trimmed && !trimmed.endsWith(',');
+          const insertion = (needsComma ? inner + ' ' : inner) + `'${PLUGIN_NAME}',`;
+          return `plugins: [${insertion}]`;
+        });
+      } else {
+        src = src.replace(/module\.exports\s*=\s*\{/, match => {
+          return `${match}\n  plugins: ['${PLUGIN_NAME}'],`;
+        });
+      }
     }
-    const pluginsArrayRegex = /plugins\s*:\s*\[([\s\S]*?)\]/m;
-    if (pluginsArrayRegex.test(src)) {
-      src = src.replace(pluginsArrayRegex, (m, inner) => {
-        const trimmed = inner.trim();
-        const needsComma = trimmed && !trimmed.endsWith(',');
-        const insertion = (needsComma ? inner + ' ' : inner) + `'${PLUGIN_NAME}',`;
-        return `plugins: [${insertion}]`;
-      });
-    } else {
-      // Add a plugins field after "module.exports = {"
-      src = src.replace(/module\.exports\s*=\s*\{/, match => {
-        return `${match}\n  plugins: ['${PLUGIN_NAME}'],`;
-      });
+
+    // Ensure preset-env has modules:false (best-effort)
+    if (!/modules:\s*false/.test(src)) {
+      // If there is an options object for preset-env, extend it; else add a preset-env block
+      if (/@babel\/preset-env"\s*,\s*\{/.test(src)) {
+        src = src.replace(/@babel\/preset-env"\s*,\s*\{([^}]*)\}/, (m, inner) => {
+          const trimmed = inner.trim();
+          const comma = trimmed && !trimmed.endsWith(',') ? ',' : '';
+          return `@babel/preset-env", { ${inner}${comma} modules: false }`;
+        });
+      } else if (/presets\s*:\s*\[/.test(src)) {
+        src = src.replace(/presets\s*:\s*\[/, `presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }], `);
+      } else {
+        // No presets at all; add new
+        src = src.replace(/module\.exports\s*=\s*\{/, match => {
+          return `${match}
+  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
+        });
+      }
     }
-    writeIfChanged(jsPath, src);
-    log(`Ensured ${PLUGIN_NAME} in ${path.basename(jsPath)}`);
+
+    writeIfChanged(targetPath, src);
+    log(`Ensured ${PLUGIN_NAME} and modules:false in ${path.basename(targetPath)}`);
     return;
   }
 
-  // Create a minimal babel.config.js
   const content =
 `module.exports = {
   presets: [
-    ["@babel/preset-env", { targets: { node: "current" } }]
+    ["@babel/preset-env", { targets: { node: "current" }, modules: false }]
   ],
   plugins: ['${PLUGIN_NAME}'],
   comments: true
 };
 `;
-  fs.writeFileSync(jsPath, content);
-  log(`Created ${path.basename(jsPath)} with ${PLUGIN_NAME}`);
+  fs.writeFileSync(targetPath, content);
+  log(`Created ${path.basename(targetPath)} (ESM-safe, modules:false)`);
 })();
 
-// ----------------- 2) Jest wiring (babel-jest) -----------------
+/* ----------------------------------------
+ * 2) Jest wiring (babel-jest)
+ * --------------------------------------*/
 (function ensureJest() {
-  if (!hasAnyDep('jest')) {
+  if (!hasDep('jest')) {
     log('Jest not detected — skipping Jest wiring.');
     return;
   }
-  const hasBabelJest = hasAnyDep('babel-jest');
-  if (!hasBabelJest) {
-    log('WARNING: babel-jest not found. Install it so Babel (and js-sanitizer) runs in Jest: npm i -D babel-jest');
+  if (!hasDep('babel-jest')) {
+    log('WARNING: babel-jest not found. Install: npm i -D babel-jest');
   }
 
-  // A) package.json "jest" block
+  // package.json "jest"
   if (pkg.jest && typeof pkg.jest === 'object') {
     const j = pkg.jest;
     j.transform = j.transform || {};
@@ -131,34 +174,27 @@ log(`Using project root: ${ROOT}`);
     return;
   }
 
-  // B) jest.config.(js|cjs)
+  // jest.config.(js|cjs)
+  const JEST_FILES = ['jest.config.js', 'jest.config.cjs'].map(f => path.join(ROOT, f));
   const cfgPath = JEST_FILES.find(exists);
   if (cfgPath) {
-    let src = fs.readFileSync(cfgPath, 'utf8');
-
-    // If file already mentions babel-jest, we’re done
+    let src = read(cfgPath);
     if (/['"]babel-jest['"]/.test(src)) {
       log(`${path.basename(cfgPath)} already references babel-jest`);
       return;
     }
-
-    // Try to inject into "module.exports = { ... }"
     const objectHeader = /module\.exports\s*=\s*\{/m;
     if (objectHeader.test(src)) {
       const transformRegex = /transform\s*:\s*\{([\s\S]*?)\}/m;
       if (transformRegex.test(src)) {
-        // Add our mapping if not present
         src = src.replace(transformRegex, (m, inner) => {
-          if (/['"]\^\.\\\+\[jt]sx\?\$['"]\s*:\s*['"]babel-jest['"]/.test(inner)) return m;
+          if (/babel-jest/.test(inner)) return m;
           const trimmed = inner.trim();
           const needsComma = trimmed && !trimmed.endsWith(',');
-          const insertion = (needsComma ? inner + ' ' : inner) + `'^^': '^^'`; // placeholder
-          const replaced = `transform: {${insertion}}`;
-          // Now swap placeholder with the real mapping (easier escaping)
-          return replaced.replace("'^^': '^^'", `'${'^.+\\\\.[jt]sx?$'}': 'babel-jest',`);
+          const insertion = (needsComma ? inner + ' ' : inner) + `'${'^.+\\\\.[jt]sx?$'}': 'babel-jest',`;
+          return `transform: {${insertion}}`;
         });
       } else {
-        // Add a whole transform field after the opening brace
         src = src.replace(objectHeader, match => {
           return `${match}
   transform: { '^.+\\\\.[jt]sx?$': 'babel-jest' },`;
@@ -168,30 +204,32 @@ log(`Using project root: ${ROOT}`);
       log(`Updated ${path.basename(cfgPath)}: ensured babel-jest transform`);
       return;
     }
-
-    // ESM/TS configs (mjs/ts) or unusual shapes: don’t auto-edit, just guide
     log(`Found ${path.basename(cfgPath)} but could not safely edit; please ensure transform uses babel-jest.`);
     return;
   }
 
-  // C) No Jest config found — create minimal one
-  const newCfg = path.join(ROOT, 'jest.config.js');
-  const content =
+  // Create minimal config
+  const newCfg =
 `/** Auto-generated by js-sanitizer setup */
 module.exports = {
   testEnvironment: 'node',
   transform: { '^.+\\\\.[jt]sx?$': 'babel-jest' }
 };`;
-  writeIfChanged(newCfg, content);
+  writeIfChanged(path.join(ROOT, 'jest.config.js'), newCfg);
   log('Created jest.config.js using babel-jest transform');
 })();
 
-// ----------------- 3) Mocha wiring (@babel/register) -----------------
+/* ----------------------------------------
+ * 3) Mocha wiring (@babel/register)
+ * --------------------------------------*/
 (function ensureMocha() {
-  if (!hasAnyDep('mocha')) {
+  if (!hasDep('mocha')) {
     log('Mocha not detected — skipping Mocha wiring.');
     return;
   }
+
+  const BABEL_REGISTER = path.join(ROOT, 'babel.register.js');
+  const MOCHA_RC = path.join(ROOT, '.mocharc.json');
 
   const regContent =
 `// Auto-generated by js-sanitizer setup
@@ -201,8 +239,7 @@ try {
     cache: true
   });
 } catch (e) {
-  // eslint-disable-next-line no-console
-  console.warn('[js-sanitizer] Mocha: @babel/register not found. Install it with: npm i -D @babel/register');
+  console.warn('[js-sanitizer] Mocha: @babel/register not found. Install with: npm i -D @babel/register');
 }`;
   writeIfChanged(BABEL_REGISTER, regContent);
 
@@ -213,48 +250,91 @@ try {
   writeJSON(MOCHA_RC, mocharc);
   log('Ensured .mocharc.json requires ./babel.register.js (Babel active for Mocha).');
 
-  if (!hasAnyDep('@babel/register')) {
-    log('WARNING: @babel/register not found. Install it for Mocha/Vitest runtime Babel: npm i -D @babel/register');
+  if (!hasDep('@babel/register')) {
+    log('WARNING: @babel/register not found. Install: npm i -D @babel/register');
   }
 })();
 
-// ----------------- 4) Vitest wiring (@babel/register) -----------------
+/* ----------------------------------------
+ * 4) Vitest wiring (vite-plugin-babel)
+ * --------------------------------------*/
 (function ensureVitest() {
-  if (!hasAnyDep('vitest')) {
+  if (!hasDep('vitest')) {
     log('Vitest not detected — skipping Vitest wiring.');
     return;
   }
 
-  const setupContent =
-`// Auto-generated by js-sanitizer setup
-try {
-  require('@babel/register')({
-    extensions: ['.js', '.jsx', '.ts', '.tsx'],
-    cache: true
-  });
-} catch (e) {
-  // eslint-disable-next-line no-console
-  console.warn('[js-sanitizer] Vitest: @babel/register not found. Install it with: npm i -D @babel/register');
-}`;
-  writeIfChanged(VITEST_SETUP, setupContent);
+  if (!hasDep('vite-plugin-babel')) {
+    log('WARNING: vite-plugin-babel not found. To enable js-sanitizer in Vitest, run: npm i -D vite-plugin-babel');
+    return;
+  }
 
-  const vitestCfg = pkg.vitest || {};
-  const setupFiles = new Set(ensureArray(vitestCfg.setupFiles));
+  // Choose config file extension: ESM projects can use .js; otherwise prefer .mjs
+  const vitestCandidates = [
+    path.join(ROOT, 'vitest.config.ts'),
+    path.join(ROOT, 'vitest.config.mjs'),
+    path.join(ROOT, 'vitest.config.js')
+  ];
+  const existing = vitestCandidates.find(exists);
+
+  const makeConfig = () => `// Auto-generated by js-sanitizer setup
+import { defineConfig } from 'vitest/config'
+import babel from 'vite-plugin-babel'
+
+export default defineConfig({
+  test: {
+    // add your test options if needed (environment, include, setupFiles, etc.)
+  },
+  plugins: [
+    babel({
+      // Only transform test/spec files
+      filter: /(\\.test|\\.spec)\\.[jt]sx?$/,
+      // Reuse your babel config file (modules:false + js-sanitizer)
+      babelConfig: { configFile: true }
+    })
+  ]
+})
+`;
+
+  if (existing) {
+    const src = read(existing);
+    if (/vite-plugin-babel/.test(src)) {
+      log(`${path.basename(existing)} already references vite-plugin-babel`);
+    } else {
+      log(`Found ${path.basename(existing)} but did not auto-edit (TS/complex ESM). Please add vite-plugin-babel manually:
+  import babel from 'vite-plugin-babel'
+  plugins: [ babel({ filter: /(\\.test|\\.spec)\\.[jt]sx?$/, babelConfig: { configFile: true } }) ]`);
+    }
+  } else {
+    // Create new config file with correct extension
+    const out = isESMProject ? path.join(ROOT, 'vitest.config.js')
+                             : path.join(ROOT, 'vitest.config.mjs');
+    writeIfChanged(out, makeConfig());
+    log(`Created ${path.basename(out)} enabling Babel via vite-plugin-babel`);
+  }
+
+  // Optional: ensure a setup file entry exists (harmless)
+  const setupPath = path.join(ROOT, 'vitest.setup.js');
+  if (!exists(setupPath)) {
+    writeIfChanged(setupPath, `// Optional setup; not required for Babel in Vite
+try { require('@babel/register')({ extensions: ['.js','.jsx','.ts','.tsx'], cache: true }); } catch {}
+`);
+  }
+  const vit = pkg.vitest || {};
+  const setupFiles = new Set(ensureArray(vit.setupFiles));
   setupFiles.add('./vitest.setup.js');
-  vitestCfg.setupFiles = Array.from(setupFiles);
-  pkg.vitest = vitestCfg;
+  vit.setupFiles = Array.from(setupFiles);
+  pkg.vitest = vit;
   writeJSON(PKG_PATH, pkg);
   log('Added ./vitest.setup.js to package.json → vitest.setupFiles');
-
-  if (!hasAnyDep('@babel/register')) {
-    log('WARNING: @babel/register not found. Install it for Mocha/Vitest runtime Babel: npm i -D @babel/register');
-  }
 })();
 
-// ----------------- 5) Final dependency hints -----------------
+/* ----------------------------------------
+ * 5) Final dependency hints
+ * --------------------------------------*/
 (function finalHints() {
-  if (!hasAnyDep('@babel/core')) {
-    log('WARNING: @babel/core not detected. Install it: npm i -D @babel/core @babel/preset-env');
+  if (!hasDep('@babel/core')) {
+    log('WARNING: @babel/core not detected. Install: npm i -D @babel/core @babel/preset-env');
   } else {
     log('@babel/core detected.');
   }
