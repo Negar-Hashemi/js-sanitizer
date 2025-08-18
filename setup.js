@@ -275,6 +275,9 @@ try {
 /* ----------------------------------------
  * 4) Vitest wiring — always create config + setup
  * --------------------------------------*/
+/* ----------------------------------------
+ * 4) Vitest wiring — always create config + setup (with passWithNoTests)
+ * --------------------------------------*/
 (function ensureVitest() {
   if (!hasDep('vitest')) {
     log('Vitest not detected — skipping Vitest wiring.');
@@ -284,7 +287,7 @@ try {
   const hasViteBabel = hasDep('vite-plugin-babel');
   const hasViteReact = hasDep('@vitejs/plugin-react');
 
-  // 4a) Always create a setup file (harmless; some users keep globals here)
+  // 4a) Always ensure a setup file exists
   const setupPath = path.join(ROOT, 'vitest.setup.js');
   if (!exists(setupPath)) {
     writeIfChanged(
@@ -304,7 +307,7 @@ try { require('@babel/register')({ extensions: ['.js','.jsx','.ts','.tsx'], cach
     log('Added ./vitest.setup.js to package.json → vitest.setupFiles');
   }
 
-  // 4b) Decide config file path and always create one if missing
+  // 4b) Decide config filename and create one if missing
   const outPath = (pkg.type === 'module')
     ? path.join(ROOT, 'vitest.config.js')   // ESM project → .js
     : path.join(ROOT, 'vitest.config.mjs'); // CJS project → .mjs (ESM syntax inside)
@@ -320,7 +323,8 @@ import babel from 'vite-plugin-babel'
 
 export default defineConfig({
   test: {
-    // add your test options as needed
+    // Keep runs green if sanitizer skips everything in a file
+    passWithNoTests: true
   },
   plugins: [
     // Run before other transforms so js-sanitizer sees docblocks
@@ -330,7 +334,11 @@ export default defineConfig({
       // Reuse babel.config.* (modules:false + module:js-sanitizer)
       babelConfig: { configFile: true }
     }) }
-  ]
+  ],
+  ssr: {
+    // Bundle all deps in SSR to avoid ESM/CJS mismatch & url load errors
+    noExternal: true
+  }
 })
 `;
   } else if (hasViteReact) {
@@ -342,7 +350,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   test: {
-    // add your test options as needed
+    passWithNoTests: true
   },
   plugins: [
     react({
@@ -351,7 +359,10 @@ export default defineConfig({
       // Or inject just the sanitizer plugin:
       babel: { plugins: ['module:js-sanitizer'] }
     })
-  ]
+  ],
+  ssr: {
+    noExternal: true
+  }
 })
 `;
   } else {
@@ -368,7 +379,10 @@ export default defineConfig({
 import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
-    // add options as needed
+    passWithNoTests: true
+  },
+  ssr: {
+    noExternal: true
   }
 })
 `;
@@ -379,16 +393,22 @@ export default defineConfig({
     const src = read(outPath);
     // If it already contains a suitable plugin reference, leave it alone
     if (/vite-plugin-babel/.test(src) || /@vitejs\/plugin-react/.test(src)) {
-      log(`${path.basename(outPath)} already contains a suitable plugin config.`);
+      // If passWithNoTests is missing, we won’t rewrite to avoid breaking custom configs—log a hint.
+      if (!/passWithNoTests\s*:\s*true/.test(src)) {
+        log(`${path.basename(outPath)} exists. Consider adding test.passWithNoTests: true to avoid "No test suite found" when all tests are skipped.`);
+      } else {
+        log(`${path.basename(outPath)} already contains a suitable plugin config.`);
+      }
       return;
     }
-    log(`Found ${path.basename(outPath)}. Not overwriting. Please add one of the plugin blocks manually (see comments inside the file).`);
+    log(`Found ${path.basename(outPath)}. Not overwriting. Please add one of the plugin blocks manually (see comments inside the file), and ensure test.passWithNoTests: true.`);
     return;
   }
 
   writeIfChanged(outPath, content);
-  log(`Created ${path.basename(outPath)} for Vitest.`);
+  log(`Created ${path.basename(outPath)} for Vitest (with passWithNoTests: true).`);
 })();
+
 
 /* ----------------------------------------
  * 5) Final dependency hints
