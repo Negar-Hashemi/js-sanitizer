@@ -9,7 +9,26 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = process.env.INIT_CWD || process.cwd();
+function findConsumerRoot() {
+  const start = process.env.INIT_CWD || process.cwd();
+  const isPkg = (dir) => {
+    try {
+      const pj = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+      return pj && pj.name && pj.name !== 'js-sanitizer';
+    } catch { return false; }
+  };
+  let dir = start;
+  const nm = path.sep + 'node_modules' + path.sep;
+  if (dir.includes(nm)) {
+    while (dir.includes(nm)) dir = path.dirname(dir);
+  }
+  while (dir !== path.dirname(dir)) {
+    if (isPkg(dir)) return dir;
+    dir = path.dirname(dir);
+  }
+  return process.env.INIT_CWD || start;
+}
+const ROOT = findConsumerRoot();
 const PKG_PATH = path.join(ROOT, 'package.json');
 const PLUGIN_NAME = 'module:js-sanitizer';
 
