@@ -1,6 +1,6 @@
 // sanitizer.js
 // Babel plugin: js-sanitizer
-// Skips tests (test/it/describe) based on docblock tags.
+// Skips tests (test/it/describe) based on docblock tags (NOW CASE-INSENSITIVE).
 
 const fs = require("fs");
 const path = require("path");
@@ -9,15 +9,22 @@ const { extract, parse } = require("jest-docblock");
 module.exports = function jsSanitizer(babel) {
   const { types: t } = babel;
 
-  const currentPlatform = process.platform; // "darwin" | "win32" | "linux"
-  const currentNodeVersion = parseInt(process.versions.node.split(".")[0], 10);
-  const currentBrowser = detectBrowser();
+  // --- Environment (normalized) ---
+  const currentPlatform = String(process.platform).toLowerCase(); // 'darwin' | 'win32' | 'linux'
+  const currentNodeVersion = (() => {
+    // major version as integer, tolerant to formats like 'v20.11.1'
+    const m = String(process.versions.node).match(/\d+/);
+    return m ? parseInt(m[0], 10) : NaN;
+  })();
+  const currentBrowser = detectBrowser(); // normalized to lowercase string or null
 
+  // --- Reporting ---
   const reportDir = fs.existsSync(path.resolve(process.cwd(), "reports"))
     ? path.resolve(process.cwd(), "reports")
     : process.cwd();
   const logFilePath = path.join(reportDir, "sanitize-tests.log");
 
+  // --- Tag handlers (tag names are matched case-insensitively) ---
   const tagHandlers = [
     {
       tag: "skipOnBrowser",
@@ -31,7 +38,7 @@ module.exports = function jsSanitizer(babel) {
       tag: "enabledOnBrowser",
       shouldSkip: (value) => {
         const list = parseList(value);
-        // Skip if we can’t detect a browser, or current not in list
+        // Skip if we can't detect a browser, or current not in list
         return !currentBrowser || !list.includes(currentBrowser);
       },
       format: (value) => `@enabledOnBrowser ${value}`,
@@ -60,7 +67,7 @@ module.exports = function jsSanitizer(babel) {
       tag: "skipForNodeRange",
       shouldSkip: (value) => {
         const { min, max } = parseRange(value);
-        return currentNodeVersion >= min && currentNodeVersion <= max;
+        return currentNodeVersion >= min && currentNodeVersion <= max; // inclusive
       },
       format: (value) => `@skipForNodeRange ${value}`,
     },
@@ -68,7 +75,7 @@ module.exports = function jsSanitizer(babel) {
       tag: "enabledForNodeRange",
       shouldSkip: (value) => {
         const { min, max } = parseRange(value);
-        return currentNodeVersion < min || currentNodeVersion > max;
+        return currentNodeVersion < min || currentNodeVersion > max; // outside the inclusive range
       },
       format: (value) => `@enabledForNodeRange ${value}`,
     },
@@ -77,29 +84,37 @@ module.exports = function jsSanitizer(babel) {
   // --- Helpers ---
 
   function detectBrowser() {
-    if (process?.env?.JS_SANITIZER_BROWSER) return process.env.JS_SANITIZER_BROWSER;
+    if (process?.env?.JS_SANITIZER_BROWSER) {
+      return String(process.env.JS_SANITIZER_BROWSER).trim().toLowerCase();
+    }
     if (typeof navigator === "undefined" || !navigator.userAgent) return null;
     const ua = navigator.userAgent;
-    if (ua.includes("Firefox")) return "Firefox";
-    if (ua.includes("Edg")) return "Edge";
-    if (ua.includes("Chrome")) return "Chrome";
-    if (ua.includes("Safari") && !ua.includes("Chrome") && !ua.includes("Chromium")) return "Safari";
+    if (ua.includes("Firefox")) return "firefox";
+    if (ua.includes("Edg")) return "edge";
+    if (ua.includes("Chrome")) return "chrome";
+    if (ua.includes("Safari") && !ua.includes("Chrome") && !ua.includes("Chromium")) return "safari";
     return null;
   }
 
+  // Split comma lists, trim, and lowercase values.
   function parseList(str) {
     return String(str || "")
       .split(",")
-      .map((s) => s.trim())
+      .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
   }
 
+  // Accept versions like "18", "v20", "20.11.1" → returns majors [18,20,...]
   function parseVersionList(str) {
     return parseList(str)
-      .map((v) => parseInt(v, 10))
+      .map((tok) => {
+        const m = tok.match(/\d+/);
+        return m ? parseInt(m[0], 10) : NaN;
+      })
       .filter((v) => Number.isFinite(v));
   }
 
+  // Parse "min=16,max=18" (case-insensitive keys/values), inclusive range based on majors.
   function parseRange(str) {
     const pairs = {};
     String(str || "")
@@ -107,12 +122,18 @@ module.exports = function jsSanitizer(babel) {
       .map((p) => p.trim())
       .filter(Boolean)
       .forEach((pair) => {
-        const [k, v] = pair.split("=").map((x) => x.trim());
-        if (k && v) pairs[k] = v;
+        const [kRaw, vRaw] = pair.split("=").map((x) => x.trim().toLowerCase());
+        if (kRaw && vRaw) pairs[kRaw] = vRaw;
       });
+    const toMajor = (s) => {
+      const m = String(s).match(/\d+/);
+      return m ? parseInt(m[0], 10) : null;
+    };
+    const min = pairs.min ? toMajor(pairs.min) : null;
+    const max = pairs.max ? toMajor(pairs.max) : null;
     return {
-      min: pairs.min ? parseInt(pairs.min, 10) : -Infinity,
-      max: pairs.max ? parseInt(pairs.max, 10) : Infinity,
+      min: min ?? -Infinity,
+      max: max ?? Infinity,
     };
   }
 
@@ -174,10 +195,16 @@ module.exports = function jsSanitizer(babel) {
           try {
             const raw = "/*" + comment.value + "*/";
             const docblock = extract(raw);
-            const pragmas = parse(docblock);
+            const pragmas = parse(docblock) || {};
+
+            // Build a lowercased pragma map for case-insensitive tag lookup.
+            const pragmasLC = Object.create(null);
+            for (const [k, v] of Object.entries(pragmas)) {
+              pragmasLC[String(k).toLowerCase()] = v;
+            }
 
             for (const { tag, shouldSkip, format } of tagHandlers) {
-              const value = pragmas[tag];
+              const value = pragmasLC[String(tag).toLowerCase()];
               if (!value) continue;
               if (shouldSkip(value)) {
                 const newCallee = forceSkip(calleeNode);
