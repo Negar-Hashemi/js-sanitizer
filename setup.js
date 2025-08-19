@@ -102,9 +102,11 @@ log(`Using project root: ${ROOT}`);
  * 1) Ensure Babel config + modules:false
  * --------------------------------------*/
 (function ensureBabelConfig() {
+  // Prefer .cjs in ESM projects when using CommonJS export to avoid "module is not defined"
   const targetBabelFile = isESMProject ? 'babel.config.cjs' : 'babel.config.js';
   const targetPath = path.join(ROOT, targetBabelFile);
 
+  // If ESM project has babel.config.js with CJS export, rename to .cjs
   const jsPath = path.join(ROOT, 'babel.config.js');
   if (isESMProject && exists(jsPath)) {
     const src = read(jsPath);
@@ -117,74 +119,96 @@ log(`Using project root: ${ROOT}`);
     }
   }
 
+  // Helper: add plugin name into a JSON-style babel config object safely
+  const addPluginToJSONCfg = (cfg) => {
+    const arr = Array.isArray(cfg.plugins) ? cfg.plugins.slice() : [];
+    if (!arr.includes(PLUGIN_NAME)) arr.push(PLUGIN_NAME);
+    cfg.plugins = arr;
+    return cfg;
+  };
+
+  // 1) JSON-based configs (do not disturb existing presets/options)
   const jsonPaths = ['.babelrc', '.babelrc.json'].map(f => path.join(ROOT, f));
   for (const p of jsonPaths) {
     if (!exists(p)) continue;
     const cfg = readJSON(p) || {};
-    cfg.presets = ensureArray(cfg.presets);
-    const idx = cfg.presets.findIndex(e => (Array.isArray(e) ? e[0] : e) === '@babel/preset-env');
-    if (idx === -1) {
-      cfg.presets.push(["@babel/preset-env", { targets: { node: "current" }, modules: false }]);
-    } else {
-      const entry = cfg.presets[idx];
-      if (Array.isArray(entry)) {
-        const opts = entry[1] || {};
-        if (opts.modules !== false) opts.modules = false;
-        if (!opts.targets) opts.targets = { node: "current" };
-        cfg.presets[idx] = ["@babel/preset-env", opts];
-      } else {
-        cfg.presets[idx] = ["@babel/preset-env", { targets: { node: "current" }, modules: false }];
-      }
-    }
-    cfg.plugins = ensureArray(cfg.plugins);
-    if (!cfg.plugins.includes(PLUGIN_NAME)) cfg.plugins.push(PLUGIN_NAME);
-    writeJSON(p, cfg);
-    log(`Updated ${path.basename(p)} with ${PLUGIN_NAME} and modules:false`);
+    const updated = addPluginToJSONCfg(cfg);
+    writeJSON(p, updated);
+    log(`Updated ${path.basename(p)}: ensured plugins include ${PLUGIN_NAME}`);
     return;
   }
 
+  // 2) Code-based config present → edit conservatively
   if (exists(targetPath)) {
     let src = read(targetPath);
+    let changed = false;
 
+    // 2a) Ensure TOP-LEVEL plugins array contains our plugin
     if (!src.includes(PLUGIN_NAME)) {
       const pluginsArrayRegex = /plugins\s*:\s*\[([\s\S]*?)\]/m;
       if (pluginsArrayRegex.test(src)) {
+        // Append into existing array with proper comma handling
         src = src.replace(pluginsArrayRegex, (m, inner) => {
           const trimmed = inner.trim();
-          const needsComma = trimmed && !trimmed.endsWith(',');
-          const insertion = (needsComma ? inner + ' ' : inner) + `'${PLUGIN_NAME}',`;
-          return `plugins: [${insertion}]`;
+          const hasTrailingComma = /,\s*$/.test(inner);
+          const innerNoTrailWS = inner.replace(/\s*$/, '');
+          const sep = trimmed ? (hasTrailingComma ? ' ' : ', ') : '';
+          return `plugins: [${innerNoTrailWS}${sep}'${PLUGIN_NAME}']`;
         });
+        changed = true;
       } else {
-        src = src.replace(/module\.exports\s*=\s*\{/, match => {
-          return `${match}\n  plugins: ['${PLUGIN_NAME}'],`;
+        // Insert a new plugins array near the start of the exported object
+        let inserted = false;
+        src = src.replace(/return\s*\{\s*/m, (mm) => {
+          inserted = true;
+          return `${mm}\n  plugins: ['${PLUGIN_NAME}'],`;
         });
+        if (!inserted) {
+          src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
+            return `${mm}\n  plugins: ['${PLUGIN_NAME}'],`;
+          });
+        }
+        changed = true;
       }
     }
 
-    if (!/modules:\s*false/.test(src)) {
-      if (/@babel\/preset-env"\s*,\s*\{/.test(src)) {
-        src = src.replace(/@babel\/preset-env"\s*,\s*\{([^}]*)\}/, (m, inner) => {
-          const trimmed = inner.trim();
-          const comma = trimmed && !trimmed.endsWith(',') ? ',' : '';
-          return `@babel/preset-env", { ${inner}${comma} modules: false }`;
-        });
-      } else if (/presets\s*:\s*\[/.test(src)) {
-        src = src.replace(/presets\s*:\s*\[/, `presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }], `);
+    // 2b) Avoid duplicating preset-env: ONLY add if completely missing (keep your options intact)
+    if (!/['"]@babel\/preset-env['"]/.test(src)) {
+      // If a presets array exists, prepend ours; else insert a new presets field.
+      const presetsRegex = /presets\s*:\s*\[/m;
+      if (presetsRegex.test(src)) {
+        src = src.replace(
+          presetsRegex,
+          `presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }], `
+        );
       } else {
-        src = src.replace(/module\.exports\s*=\s*\{/, match => {
-          return `${match}
+        let inserted = false;
+        src = src.replace(/return\s*\{\s*/m, (mm) => {
+          inserted = true;
+          return `${mm}
   presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
         });
+        if (!inserted) {
+          src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
+            return `${mm}
+  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
+          });
+        }
       }
+      changed = true;
     }
 
-    writeIfChanged(targetPath, src);
-    log(`Ensured ${PLUGIN_NAME} and modules:false in ${path.basename(targetPath)}`);
+    if (changed) {
+      writeIfChanged(targetPath, src);
+      log(`Updated ${path.basename(targetPath)}: ensured ${PLUGIN_NAME} and no duplicate preset-env`);
+    } else {
+      log(`${path.basename(targetPath)} already contains ${PLUGIN_NAME} and preset-env`);
+    }
     return;
   }
 
-  const content =
+  // 3) No config found → create a minimal one
+  const minimal =
 `module.exports = {
   presets: [
     ["@babel/preset-env", { targets: { node: "current" }, modules: false }]
@@ -193,9 +217,10 @@ log(`Using project root: ${ROOT}`);
   comments: true
 };
 `;
-  fs.writeFileSync(targetPath, content);
-  log(`Created ${path.basename(targetPath)} (ESM-safe, modules:false)`);
+  fs.writeFileSync(targetPath, minimal);
+  log(`Created ${path.basename(targetPath)} (minimal, includes ${PLUGIN_NAME})`);
 })();
+
 
 /* ----------------------------------------
  * 2) Jest wiring (babel-jest)
