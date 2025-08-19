@@ -25,6 +25,33 @@ const writeIfChanged = (p, s) => {
   fs.writeFileSync(p, str);
   return true;
 };
+
+// ---- NEW: safe package.json updater (prevents stale overwrite) ----
+function updatePkg(mutator) {
+  const before = readJSON(PKG_PATH) || {};
+  const copy = JSON.parse(JSON.stringify(before));
+  const out = mutator(copy) || copy;
+  const changed = JSON.stringify(out) !== JSON.stringify(before);
+  if (changed) writeJSON(PKG_PATH, out);
+  return changed;
+}
+
+function ensureDevDepInPkg(name, version = '*') {
+  return updatePkg((p) => {
+    p.devDependencies = p.devDependencies || {};
+    if (!p.devDependencies[name] && !p.dependencies?.[name] && !p.peerDependencies?.[name]) {
+      p.devDependencies[name] = version;
+      log(`Added ${name}@${version} to package.json devDependencies`);
+    }
+    return p;
+  });
+}
+
+function hasAnyDep(name) {
+  const p = readJSON(PKG_PATH) || {};
+  return !!(p.dependencies?.[name] || p.devDependencies?.[name] || p.peerDependencies?.[name]);
+}
+
 const ensureArray = (x) => (Array.isArray(x) ? x : (x == null ? [] : [x]));
 const log = (m) => console.log(`[js-sanitizer setup] ${m}`);
 
@@ -64,6 +91,7 @@ if (process.env.JS_SANITIZER_SKIP_SETUP === '1') {
   process.exit(0);
 }
 
+// initial snapshot (used for non-destructive reads only)
 const pkg = readJSON(PKG_PATH) || {};
 const isESMProject = pkg.type === 'module';
 const hasDep = (name) => !!(pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.peerDependencies?.[name]);
@@ -74,11 +102,9 @@ log(`Using project root: ${ROOT}`);
  * 1) Ensure Babel config + modules:false
  * --------------------------------------*/
 (function ensureBabelConfig() {
-  // Prefer .cjs in ESM projects to avoid "module is not defined"
   const targetBabelFile = isESMProject ? 'babel.config.cjs' : 'babel.config.js';
   const targetPath = path.join(ROOT, targetBabelFile);
 
-  // If ESM project has babel.config.js with CJS export, rename to .cjs
   const jsPath = path.join(ROOT, 'babel.config.js');
   if (isESMProject && exists(jsPath)) {
     const src = read(jsPath);
@@ -91,7 +117,6 @@ log(`Using project root: ${ROOT}`);
     }
   }
 
-  // Update JSON configs if present
   const jsonPaths = ['.babelrc', '.babelrc.json'].map(f => path.join(ROOT, f));
   for (const p of jsonPaths) {
     if (!exists(p)) continue;
@@ -118,7 +143,6 @@ log(`Using project root: ${ROOT}`);
     return;
   }
 
-  // Update code-based config if present; else create a minimal one
   if (exists(targetPath)) {
     let src = read(targetPath);
 
@@ -190,18 +214,14 @@ log(`Using project root: ${ROOT}`);
     }
   }
 
-  if (pkg.jest && typeof pkg.jest === 'object') {
-    const j = pkg.jest;
-    j.transform = j.transform || {};
-    const KEY = '^.+\\.[jt]sx?$';
-    const VAL = 'babel-jest';
-    if (j.transform[KEY] !== VAL) {
-      j.transform[KEY] = VAL;
-      writeJSON(PKG_PATH, pkg);
-      log('Updated package.json: set jest.transform → babel-jest');
-    } else {
-      log('package.json jest.transform already uses babel-jest');
-    }
+  if ((readJSON(PKG_PATH) || {}).jest && typeof (readJSON(PKG_PATH) || {}).jest === 'object') {
+    updatePkg((p) => {
+      p.jest = p.jest || {};
+      p.jest.transform = p.jest.transform || {};
+      p.jest.transform['^.+\\.[jt]sx?$'] = 'babel-jest';
+      return p;
+    });
+    log('Updated package.json: set jest.transform → babel-jest');
     return;
   }
 
@@ -289,14 +309,15 @@ try {
 })();
 
 /* ----------------------------------------
- * 4) Vitest wiring (self-healing config)
+ * 4) Vitest wiring (self-healing config + ensure vite-plugin-babel)
  * --------------------------------------*/
 (function ensureVitest() {
-  if (!hasDep('vitest')) {
+  if (!hasAnyDep('vitest')) {
     if (process.env.JS_SANITIZER_AUTO_INSTALL === '1') {
-      log('Vitest not detected. Attempting to auto-install vitest…');
+      log('Vitest not detected. Attempting to add and auto-install vitest…');
+      ensureDevDepInPkg('vitest', '*');
       const ok = tryInstall(['vitest'], true);
-      if (!ok && !hasDep('vitest')) {
+      if (!ok && !hasAnyDep('vitest')) {
         log('Vitest not detected and auto-install failed — skipping Vitest wiring.');
         return;
       }
@@ -306,25 +327,22 @@ try {
     }
   }
 
-  // ⬇️ Ensure vite-plugin-babel ⬇️
-  if (!hasDep('vite-plugin-babel')) {
-    log('vite-plugin-babel not found.');
-    const ok = tryInstall(['vite-plugin-babel'], true);
-    if (!ok && !hasDep('vite-plugin-babel')) {
-      log('WARNING: vite-plugin-babel still missing. Install manually: npm i -D vite-plugin-babel');
+  // Ensure vite-plugin-babel is recorded and (optionally) installed.
+  if (!hasAnyDep('vite-plugin-babel')) {
+    log('vite-plugin-babel not found; adding to devDependencies.');
+    ensureDevDepInPkg('vite-plugin-babel', '*');
+    const installed = tryInstall(['vite-plugin-babel'], true);
+    if (!hasAnyDep('vite-plugin-babel')) {
+      log('WARNING: vite-plugin-babel is still missing. Run: npm i -D vite-plugin-babel');
+    } else if (!installed) {
+      log('NOTE: vite-plugin-babel added to package.json. Run your package manager install to fetch it.');
     }
   }
 
-  // Decide file extension:
-  // - If project is ESM ("type":"module"), use .js
-  // - Otherwise use .mjs so we can use ESM syntax safely
   const outPath = isESMProject
     ? path.join(ROOT, 'vitest.config.js')
     : path.join(ROOT, 'vitest.config.mjs');
 
-  // Write a config that conditionally imports vite-plugin-babel at runtime.
-  // This avoids ERR_MODULE_NOT_FOUND during fresh installs while still enabling
-  // the plugin automatically when it’s present.
   const makeConfig = () => `// Auto-generated by js-sanitizer setup
 import { defineConfig } from 'vitest/config'
 
@@ -334,12 +352,12 @@ export default defineConfig(async () => {
     const { default: babel } = await import('vite-plugin-babel');
     plugins.push(
       babel({
-        // Only transform test/spec files
-        filter: /(\\.test|\\.spec)\\.[jt]sx?$/,
-        // Reuse your babel config file (modules:false + js-sanitizer)
-        babelConfig: { configFile: true }
+        // Broad but safe: *.test|spec.(js|jsx|ts|tsx|mjs|cjs)
+        filter: /\\.(test|spec)\\.(?:[cm]?jsx?|tsx?)$/,
+        babelConfig: { configFile: true, babelrc: true }
       })
     );
+    console.info('[js-sanitizer] vite-plugin-babel enabled for test files');
   } catch (e) {
     // vite-plugin-babel not installed — tests will still run.
     // Install it to enable Babel transforms in Vitest:
@@ -356,7 +374,6 @@ export default defineConfig(async () => {
 });
 `;
 
-  // Respect existing TS configs; don’t attempt to edit them.
   const existingCandidates = [
     path.join(ROOT, 'vitest.config.ts'),
     path.join(ROOT, 'vitest.config.mjs'),
@@ -369,8 +386,6 @@ export default defineConfig(async () => {
     if (base === 'vitest.config.ts') {
       log('vitest.config.ts detected — not auto-editing. If desired, mirror the async import pattern there.');
     } else {
-      // Only write our config if the existing file is ours and content differs.
-      // If it’s a user-maintained file, we just log guidance to avoid breaking changes.
       const src = read(existing);
       const oursMarker = src.includes('// Auto-generated by js-sanitizer setup');
       if (oursMarker) {
@@ -385,7 +400,17 @@ export default defineConfig(async () => {
     log(`Created ${path.basename(outPath)} with conditional vite-plugin-babel wiring.`);
   }
 
-  // Ensure a setup file entry exists (idempotent)
+  // ---- IMPORTANT: write to package.json using updatePkg (fresh read) ----
+  updatePkg((p) => {
+    p.vitest = p.vitest || {};
+    const s = new Set(ensureArray(p.vitest.setupFiles));
+    s.add('./vitest.setup.js');
+    p.vitest.setupFiles = Array.from(s);
+    return p;
+  });
+  log('Added ./vitest.setup.js to package.json → vitest.setupFiles');
+
+  // Ensure setup file exists
   const setupPath = path.join(ROOT, 'vitest.setup.js');
   if (!exists(setupPath)) {
     writeIfChanged(setupPath, `// Auto-generated by js-sanitizer setup
@@ -393,13 +418,6 @@ export default defineConfig(async () => {
 try { require('@babel/register')({ extensions: ['.js','.jsx','.ts','.tsx'], cache: true }); } catch {}
 `);
   }
-  const vit = pkg.vitest || {};
-  const setupFiles = new Set(ensureArray(vit.setupFiles));
-  setupFiles.add('./vitest.setup.js');
-  vit.setupFiles = Array.from(setupFiles);
-  pkg.vitest = vit;
-  writeJSON(PKG_PATH, pkg);
-  log('Added ./vitest.setup.js to package.json → vitest.setupFiles');
 })();
 
 /* ----------------------------------------
