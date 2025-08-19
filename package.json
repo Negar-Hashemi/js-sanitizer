@@ -46,7 +46,7 @@
     "@babel/core": ">=7.22.0"
   },
   "dependencies": {
-    "jest-docblock": "^29.7.0",
+    "jest-docblock": "^29.7.0"
   },
   "devDependencies": {
     "@babel/core": "^7.25.0",
