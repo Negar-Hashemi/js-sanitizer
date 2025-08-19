@@ -292,7 +292,6 @@ try {
  * 4) Vitest wiring (self-healing config)
  * --------------------------------------*/
 (function ensureVitest() {
-  // If Vitest missing, optionally bootstrap it when auto-install is enabled
   if (!hasDep('vitest')) {
     if (process.env.JS_SANITIZER_AUTO_INSTALL === '1') {
       log('Vitest not detected. Attempting to auto-install vitest…');
@@ -304,6 +303,15 @@ try {
     } else {
       log('Vitest not detected — skipping Vitest wiring.');
       return;
+    }
+  }
+
+  // ⬇️ Ensure vite-plugin-babel ⬇️
+  if (!hasDep('vite-plugin-babel')) {
+    log('vite-plugin-babel not found.');
+    const ok = tryInstall(['vite-plugin-babel'], true);
+    if (!ok && !hasDep('vite-plugin-babel')) {
+      log('WARNING: vite-plugin-babel still missing. Install manually: npm i -D vite-plugin-babel');
     }
   }
 
