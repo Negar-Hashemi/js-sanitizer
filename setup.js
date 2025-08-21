@@ -257,6 +257,24 @@ log(`Using project root: ${ROOT}`);
   // prefer to edit that in-place to enable Babel in ts-jest.
   const pkgHasInlineJest = !!freshPkg.jest && typeof freshPkg.jest === 'object';
 
+  // --- NEW: migrate misplaced top-level globals['ts-jest'] into jest.globals['ts-jest']
+  if (pkgHasInlineJest && freshPkg.globals && freshPkg.globals['ts-jest']) {
+    updatePkg((p) => {
+      p.jest = p.jest || {};
+      p.jest.globals = p.jest.globals || {};
+      const fromTop = p.globals && p.globals['ts-jest'] || {};
+      const current = p.jest.globals['ts-jest'] || {};
+      p.jest.globals['ts-jest'] = Object.assign({}, current, fromTop, { babelConfig: true });
+      // cleanup top-level if empty after move
+      if (p.globals) {
+        delete p.globals['ts-jest'];
+        if (Object.keys(p.globals).length === 0) delete p.globals;
+      }
+      return p;
+    });
+    log('Moved top-level globals.ts-jest → jest.globals["ts-jest"] with babelConfig:true');
+  }
+
   // If no inline jest block and no file config, we will create jest.config.js below.
   const JEST_FILES = ['jest.config.js', 'jest.config.cjs'].map(f => path.join(ROOT, f));
   const jestCfgPath = JEST_FILES.find(exists);
@@ -273,8 +291,10 @@ log(`Using project root: ${ROOT}`);
         if (!p.jest.transform[tsKey]) {
           p.jest.transform[tsKey] = 'ts-jest';
         }
-        p.globals = p.globals || {};
-        p.globals['ts-jest'] = Object.assign({}, p.globals['ts-jest'], { babelConfig: true });
+        // >>> FIX: write under jest.globals (not top-level)
+        p.jest.globals = p.jest.globals || {};
+        const cur = p.jest.globals['ts-jest'] || {};
+        p.jest.globals['ts-jest'] = Object.assign({}, cur, { babelConfig: true });
         log('Enabled ts-jest → Babel pass via package.json jest.globals["ts-jest"].babelConfig');
       } else {
         // Fallback to babel-jest if no ts-jest
