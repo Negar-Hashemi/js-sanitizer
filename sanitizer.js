@@ -19,10 +19,13 @@ module.exports = function jsSanitizer(babel) {
   const currentBrowser = detectBrowser(); // normalized to lowercase string or null
 
   // --- Reporting ---
-  const reportDir = fs.existsSync(path.resolve(process.cwd(), "reports"))
-    ? path.resolve(process.cwd(), "reports")
-    : process.cwd();
-  const logFilePath = path.join(reportDir, "sanitize-tests.log");
+  const reportDir = path.resolve(process.cwd(), "reports");
+
+  // Ensure the reports directory exists
+  if (!fs.existsSync(reportDir)) {
+    fs.mkdirSync(reportDir, { recursive: true });
+  }
+  const logFilePath = path.join(reportDir, "environment-sanitized-tests.log");
 
   // --- Tag handlers (tag names are matched case-insensitively) ---
   const tagHandlers = [
