@@ -143,14 +143,13 @@ log(`Using project root: ${ROOT}`);
     let src = read(targetPath);
     let changed = false;
 
-    // --- Inject into swagger-ui style env blocks FIRST (safer than adding a top-level plugins) ---
-    (function injectEnvAware() {
+    // --- Inject ONLY into env.commonjs.plugins if present (Jest path) ---
+    (function injectIntoCommonjsEnv() {
       let localChanged = false;
 
       function appendIntoPluginsBlock(source, blockLabelRegex) {
-        // Matches a labeled object literal start and captures its body up to the matching }
+        // Matches the start of the object literal and captures its body
         return source.replace(blockLabelRegex, (whole, head, body) => {
-          // Find plugins: [ ... ] within the captured body
           const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
           if (pluginsRx.test(body)) {
             body = body.replace(pluginsRx, (m, inner) => {
@@ -173,35 +172,21 @@ log(`Using project root: ${ROOT}`);
         });
       }
 
-      // 1) const browser = { ... }
-      const browserBlock = /(const\s+browser\s*=\s*\{\s*)([\s\S]*?)\}/m;
-      if (browserBlock.test(src)) {
-        src = appendIntoPluginsBlock(src, browserBlock);
-      }
-
-      // 2) env.commonjs : { ... }
+      // Find the env.commonjs block only (do not touch browser/esm/etc.)
+      // This regex targets the inner object for the "commonjs" env key.
       const envCommonjs = /(\bcommonjs\s*:\s*\{\s*)([\s\S]*?)\}/m;
       if (envCommonjs.test(src)) {
         src = appendIntoPluginsBlock(src, envCommonjs);
       }
 
-      // 3) env.esm : { ... }
-      const envEsm = /(\besm\s*:\s*\{\s*)([\s\S]*?)\}/m;
-      if (envEsm.test(src)) {
-        src = appendIntoPluginsBlock(src, envEsm);
-      }
-
-      if (localChanged) {
-        changed = true;
-      }
+      if (localChanged) changed = true;
     })();
 
-    // 2a) Ensure TOP-LEVEL plugins array contains our plugin
-    // Only do this if we did NOT already inject into env blocks (to avoid redundant/global apply)
+    // 2a) If we didn't inject via env.commonjs (plugin still not present),
+    // ensure a TOP-LEVEL plugins array contains our plugin (generic fallback).
     if (!src.includes(PLUGIN_NAME)) {
       const pluginsArrayRegex = /plugins\s*:\s*\[([\s\S]*?)\]/m;
       if (pluginsArrayRegex.test(src)) {
-        // Append into existing array with proper comma handling
         src = src.replace(pluginsArrayRegex, (m, inner) => {
           if (inner.includes(`'${PLUGIN_NAME}'`) || inner.includes(`"${PLUGIN_NAME}"`)) return m;
           const trimmed = inner.trim();
@@ -213,7 +198,6 @@ log(`Using project root: ${ROOT}`);
         changed = true;
       } else {
         // Insert a new top-level plugins array if there isn't one anywhere
-        // Prefer inserting right after "return {" or "module.exports = {"
         let inserted = false;
         src = src.replace(/return\s*\{\s*/m, (mm) => {
           inserted = true;
@@ -228,9 +212,8 @@ log(`Using project root: ${ROOT}`);
       }
     }
 
-    // 2b) Avoid duplicating preset-env: ONLY add if completely missing (keep your options intact)
+    // 2b) Avoid duplicating preset-env: ONLY add if completely missing
     if (!/['"]@babel\/preset-env['"]/.test(src)) {
-      // If a presets array exists, prepend ours; else insert a new presets field.
       const presetsRegex = /presets\s*:\s*\[/m;
       if (presetsRegex.test(src)) {
         src = src.replace(
@@ -256,7 +239,7 @@ log(`Using project root: ${ROOT}`);
 
     if (changed) {
       writeIfChanged(targetPath, src);
-      log(`Updated ${path.basename(targetPath)}: ensured ${PLUGIN_NAME} (env-aware) and no duplicate preset-env`);
+      log(`Updated ${path.basename(targetPath)}: ensured ${PLUGIN_NAME} in env.commonjs (or top-level fallback) and no duplicate preset-env`);
     } else {
       log(`${path.basename(targetPath)} already contains ${PLUGIN_NAME} and preset-env`);
     }
