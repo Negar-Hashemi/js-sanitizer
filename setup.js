@@ -396,9 +396,6 @@ module.exports = {
 })();
 
 /* ----------------------------------------
- * 3) Mocha wiring (@babel/register)
- * --------------------------------------*/
-/* ----------------------------------------
  * 3) Mocha wiring (@babel/register)  — robust + legacy-friendly
  * --------------------------------------*/
 (function ensureMocha() {
