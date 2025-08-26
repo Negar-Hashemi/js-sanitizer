@@ -143,12 +143,67 @@ log(`Using project root: ${ROOT}`);
     let src = read(targetPath);
     let changed = false;
 
+    // --- Inject into swagger-ui style env blocks FIRST (safer than adding a top-level plugins) ---
+    (function injectEnvAware() {
+      let localChanged = false;
+
+      function appendIntoPluginsBlock(source, blockLabelRegex) {
+        // Matches a labeled object literal start and captures its body up to the matching }
+        return source.replace(blockLabelRegex, (whole, head, body) => {
+          // Find plugins: [ ... ] within the captured body
+          const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
+          if (pluginsRx.test(body)) {
+            body = body.replace(pluginsRx, (m, inner) => {
+              if (inner.includes(`'${PLUGIN_NAME}'`) || inner.includes(`"${PLUGIN_NAME}"`)) {
+                return m; // already present
+              }
+              const trimmed = inner.trim();
+              const hasTrailingComma = /,\s*$/.test(inner);
+              const innerNoTrailWS = inner.replace(/\s*$/, '');
+              const sep = trimmed ? (hasTrailingComma ? ' ' : ', ') : '';
+              localChanged = true;
+              return `plugins: [${innerNoTrailWS}${sep}'${PLUGIN_NAME}']`;
+            });
+          } else {
+            // No plugins array: insert one at the top of the object literal body
+            localChanged = true;
+            body = body.replace(/^\s*/, match => `${match}plugins: ['${PLUGIN_NAME}'],\n`);
+          }
+          return `${head}${body}}`;
+        });
+      }
+
+      // 1) const browser = { ... }
+      const browserBlock = /(const\s+browser\s*=\s*\{\s*)([\s\S]*?)\}/m;
+      if (browserBlock.test(src)) {
+        src = appendIntoPluginsBlock(src, browserBlock);
+      }
+
+      // 2) env.commonjs : { ... }
+      const envCommonjs = /(\bcommonjs\s*:\s*\{\s*)([\s\S]*?)\}/m;
+      if (envCommonjs.test(src)) {
+        src = appendIntoPluginsBlock(src, envCommonjs);
+      }
+
+      // 3) env.esm : { ... }
+      const envEsm = /(\besm\s*:\s*\{\s*)([\s\S]*?)\}/m;
+      if (envEsm.test(src)) {
+        src = appendIntoPluginsBlock(src, envEsm);
+      }
+
+      if (localChanged) {
+        changed = true;
+      }
+    })();
+
     // 2a) Ensure TOP-LEVEL plugins array contains our plugin
+    // Only do this if we did NOT already inject into env blocks (to avoid redundant/global apply)
     if (!src.includes(PLUGIN_NAME)) {
       const pluginsArrayRegex = /plugins\s*:\s*\[([\s\S]*?)\]/m;
       if (pluginsArrayRegex.test(src)) {
         // Append into existing array with proper comma handling
         src = src.replace(pluginsArrayRegex, (m, inner) => {
+          if (inner.includes(`'${PLUGIN_NAME}'`) || inner.includes(`"${PLUGIN_NAME}"`)) return m;
           const trimmed = inner.trim();
           const hasTrailingComma = /,\s*$/.test(inner);
           const innerNoTrailWS = inner.replace(/\s*$/, '');
@@ -157,7 +212,8 @@ log(`Using project root: ${ROOT}`);
         });
         changed = true;
       } else {
-        // Insert a new plugins array near the start of the exported object
+        // Insert a new top-level plugins array if there isn't one anywhere
+        // Prefer inserting right after "return {" or "module.exports = {"
         let inserted = false;
         src = src.replace(/return\s*\{\s*/m, (mm) => {
           inserted = true;
@@ -200,7 +256,7 @@ log(`Using project root: ${ROOT}`);
 
     if (changed) {
       writeIfChanged(targetPath, src);
-      log(`Updated ${path.basename(targetPath)}: ensured ${PLUGIN_NAME} and no duplicate preset-env`);
+      log(`Updated ${path.basename(targetPath)}: ensured ${PLUGIN_NAME} (env-aware) and no duplicate preset-env`);
     } else {
       log(`${path.basename(targetPath)} already contains ${PLUGIN_NAME} and preset-env`);
     }
