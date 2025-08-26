@@ -149,28 +149,85 @@ module.exports = function jsSanitizer(babel) {
     }
   }
 
-  function nearestBlockComments(path) {
-    const here = path.node.leadingComments || [];
-    if (here.length) return here;
-    return path.parent?.leadingComments || [];
-  }
+  // ---- NEW: robust callee analysis (handles X, X.only, X.skip) ----
+  function analyzeCallee(callee) {
+    // Allowed bases (do NOT add new names to avoid changing behavior)
+    const TESTS = new Set(["test", "it"]);
+    const SUITES = new Set(["describe"]);
 
-  function baseTestName(node) {
-    if (t.isIdentifier(node)) return node.name;
-    if (t.isMemberExpression(node) && t.isIdentifier(node.object)) {
-      return node.object.name;
+    if (t.isIdentifier(callee)) {
+      const base = callee.name;
+      if (TESTS.has(base) || SUITES.has(base)) return { base, mod: null };
+      return null;
+    }
+    if (t.isMemberExpression(callee) && t.isIdentifier(callee.object)) {
+      const base = callee.object.name;
+      if (!(new Set([...TESTS, ...SUITES]).has(base))) return null;
+      let mod = null;
+      if (t.isIdentifier(callee.property)) mod = callee.property.name;
+      else if (t.isStringLiteral(callee.property)) mod = callee.property.value;
+      return { base, mod };
     }
     return null;
   }
 
-  function forceSkip(node) {
-    if (t.isIdentifier(node)) {
-      return t.memberExpression(node, t.identifier("skip"));
+  // ---- NEW: prefer docblock on ExpressionStatement (common case), with fallbacks ----
+  function getDocblockPragmas(path) {
+    const collectLeading = (node) =>
+      node && node.leadingComments ? node.leadingComments : [];
+
+    // 1) Most docblocks attach to the ExpressionStatement that wraps the call
+    const exprNode =
+      path.parentPath && path.parentPath.isExpressionStatement()
+        ? path.parentPath.node
+        : null;
+    let comments = collectLeading(exprNode);
+
+    // 2) Fallback: use the CallExpression's own leading comments
+    if (!comments || comments.length === 0) comments = collectLeading(path.node);
+
+    // 3) Fallback: one more level up (rare)
+    if (
+      (!comments || comments.length === 0) &&
+      path.parentPath &&
+      path.parentPath.parent
+    ) {
+      comments = collectLeading(path.parentPath.parent);
     }
-    if (t.isMemberExpression(node) && t.isIdentifier(node.object)) {
-      return t.memberExpression(node.object, t.identifier("skip"));
+
+    if (!comments || comments.length === 0) return null;
+
+    // Choose the closest preceding block comment
+    const lastBlock = [...comments].reverse().find((c) => c.type === "CommentBlock");
+    if (!lastBlock) return null;
+
+    try {
+      const raw = "/*" + lastBlock.value + "*/";
+      const docblock = extract(raw);
+      const pragmas = parse(docblock) || {};
+
+      // Lowercase keys for case-insensitive lookup
+      const pragmasLC = Object.create(null);
+      for (const [k, v] of Object.entries(pragmas)) {
+        pragmasLC[String(k).toLowerCase()] = v;
+      }
+      return pragmasLC;
+    } catch {
+      return null;
     }
-    return node;
+  }
+
+  // ---- NEW: force any variant (X or X.only) to X.skip ----
+  function forceSkipCallee(callee, baseName) {
+    // it(...) -> it.skip(...)
+    if (t.isIdentifier(callee)) {
+      return t.memberExpression(t.identifier(baseName), t.identifier("skip"));
+    }
+    // it.only(...) / it.xxx(...) -> it.skip(...)
+    if (t.isMemberExpression(callee) && t.isIdentifier(callee.object)) {
+      return t.memberExpression(t.identifier(baseName), t.identifier("skip"));
+    }
+    return callee;
   }
 
   // --- Core ---
@@ -180,49 +237,34 @@ module.exports = function jsSanitizer(babel) {
     visitor: {
       CallExpression(path, state) {
         const filename = state.file.opts.filename || "";
-        const calleeNode = path.node.callee;
-        const baseName = baseTestName(calleeNode);
+        const info = analyzeCallee(path.node.callee);
+        if (!info) return;
 
-        if (!baseName || !["test", "it", "describe"].includes(baseName)) return;
-        if (t.isMemberExpression(calleeNode) && t.isIdentifier(calleeNode.property, { name: "skip" })) {
-          return; // already skipped
-        }
+        const { base, mod } = info;
+        // Respect existing .skip; we may override .only if a pragma says skip
+        if (mod === "skip") return;
 
         const args = path.node.arguments;
-        const testName = args[0]?.type === "StringLiteral" ? args[0].value : "(unnamed)";
-        const comments = nearestBlockComments(path);
-        if (!comments.length) return;
+        const testName =
+          args[0]?.type === "StringLiteral" ? args[0].value : "(unnamed)";
 
-        for (const comment of comments) {
-          if (comment.type !== "CommentBlock") continue;
-          try {
-            const raw = "/*" + comment.value + "*/";
-            const docblock = extract(raw);
-            const pragmas = parse(docblock) || {};
+        const pragmasLC = getDocblockPragmas(path);
+        if (!pragmasLC) return;
 
-            // Build a lowercased pragma map for case-insensitive tag lookup.
-            const pragmasLC = Object.create(null);
-            for (const [k, v] of Object.entries(pragmas)) {
-              pragmasLC[String(k).toLowerCase()] = v;
-            }
+        // Use your existing handlers, matching keys case-insensitively
+        for (const { tag, shouldSkip, format } of tagHandlers) {
+          const value = pragmasLC[String(tag).toLowerCase()];
+          if (!value) continue;
+          if (shouldSkip(value)) {
+            const newCallee = forceSkipCallee(path.node.callee, base);
+            path.get("callee").replaceWith(newCallee);
 
-            for (const { tag, shouldSkip, format } of tagHandlers) {
-              const value = pragmasLC[String(tag).toLowerCase()];
-              if (!value) continue;
-              if (shouldSkip(value)) {
-                const newCallee = forceSkip(calleeNode);
-                path.get("callee").replaceWith(newCallee);
-
-                const msg = `[SKIPPING] ${baseName}("${testName}") in ${filename} due to ${format(value)}`;
-                console.warn(msg);
-                logMessage(msg);
-                return;
-              }
-            }
-          } catch (err) {
-            const warn = `[WARN] Failed to process comment in ${filename}: ${err.message}`;
-            console.warn(warn);
-            logMessage(warn);
+            const msg = `[SKIPPING] ${base}("${testName}") in ${filename} due to ${format(
+              value
+            )}`;
+            console.warn(msg);
+            logMessage(msg);
+            return;
           }
         }
       },
