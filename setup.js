@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * js-sanitizer setup (Jest + Mocha + Vitest)
- * - Operates in consumer project (INIT_CWD)
+ * - Operates in consumer project (prefers npm_config_local_prefix / INIT_CWD)
  * - Ensures Babel config exists, includes plugin, and keeps ESM (modules:false)
  * - Wires Jest (babel-jest), Mocha (@babel/register), Vitest (vite-plugin-babel)
  * - Idempotent, conservative edits; clear warnings
@@ -12,36 +12,19 @@ const path = require('path');
 const cp = require('child_process');
 
 const ROOT = (() => {
-  // 1) If we're installed in <consumer>/node_modules/js-sanitizer,
-  //    two levels up is the consumer package root.
-  const twoUp = path.resolve(__dirname, '..', '..');
-  if (
-    fs.existsSync(path.join(twoUp, 'package.json')) &&
-    !/node_modules[\\/]/.test(twoUp) // guard against odd layouts
-  ) {
-    return twoUp;
-  }
-
-  // 2) npm/pnpm/yarn set this to the package being installed INTO
+  // Prefer workspace signals first (robust even when the dep is hoisted)
   const localPrefix = process.env.npm_config_local_prefix;
-  if (
-    localPrefix &&
-    fs.existsSync(path.join(localPrefix, 'package.json')) &&
-    // ensure it's not our own package folder (dependency)
-    path.basename(localPrefix) !== 'js-sanitizer'
-  ) {
+  if (localPrefix && fs.existsSync(path.join(localPrefix, 'package.json'))) {
     return localPrefix;
   }
-
-  // 3) INIT_CWD is often the monorepo root; still better than CWD in postinstall
-  if (
-    process.env.INIT_CWD &&
-    fs.existsSync(path.join(process.env.INIT_CWD, 'package.json'))
-  ) {
+  if (process.env.INIT_CWD && fs.existsSync(path.join(process.env.INIT_CWD, 'package.json'))) {
     return process.env.INIT_CWD;
   }
-
-  // 4) Last resort
+  // Fallback: if installed under <consumer>/node_modules/js-sanitizer, twoUp is the consumer
+  const twoUp = path.resolve(__dirname, '..', '..');
+  if (fs.existsSync(path.join(twoUp, 'package.json')) && !/node_modules[\\/]/.test(twoUp)) {
+    return twoUp;
+  }
   return process.cwd();
 })();
 
@@ -59,7 +42,7 @@ const writeIfChanged = (p, s) => {
   return true;
 };
 
-// ---- NEW: safe package.json updater (prevents stale overwrite) ----
+// ---- safe package.json updater (prevents stale overwrite) ----
 function updatePkg(mutator) {
   const before = readJSON(PKG_PATH) || {};
   const copy = JSON.parse(JSON.stringify(before));
@@ -132,7 +115,7 @@ const hasDep = (name) => !!(pkg.dependencies?.[name] || pkg.devDependencies?.[na
 log(`Using project root: ${ROOT}`);
 
 /* ----------------------------------------
- * 1) Ensure Babel config + modules:false
+ * 1) Ensure Babel config + modules:false (+ TS when present)
  * --------------------------------------*/
 (function ensureBabelConfig() {
   // Prefer .cjs in ESM projects when using CommonJS export to avoid "module is not defined"
@@ -160,14 +143,32 @@ log(`Using project root: ${ROOT}`);
     return cfg;
   };
 
+  // Helper: ensure preset exists in JSON cfg
+  const ensurePresetInJSONCfg = (cfg, presetName, presetConfig) => {
+    cfg.presets = Array.isArray(cfg.presets) ? cfg.presets.slice() : [];
+    const hasPreset = cfg.presets.some(p => {
+      if (typeof p === 'string') return p === presetName;
+      if (Array.isArray(p)) return p[0] === presetName;
+      return false;
+    });
+    if (!hasPreset) cfg.presets.unshift([presetName, presetConfig]);
+    return cfg;
+  };
+
+  const typescriptPresent = hasAnyDep('typescript');
+
   // 1) JSON-based configs (do not disturb existing presets/options)
   const jsonPaths = ['.babelrc', '.babelrc.json'].map(f => path.join(ROOT, f));
   for (const p of jsonPaths) {
     if (!exists(p)) continue;
-    const cfg = readJSON(p) || {};
-    const updated = addPluginToJSONCfg(cfg);
-    writeJSON(p, updated);
-    log(`Updated ${path.basename(p)}: ensured plugins include ${PLUGIN_NAME}`);
+    let cfg = readJSON(p) || {};
+    cfg = ensurePresetInJSONCfg(cfg, '@babel/preset-env', { targets: { node: 'current' }, modules: false });
+    if (typescriptPresent) {
+      cfg = ensurePresetInJSONCfg(cfg, '@babel/preset-typescript', { allowDeclareFields: true });
+    }
+    cfg = addPluginToJSONCfg(cfg);
+    writeJSON(p, cfg);
+    log(`Updated ${path.basename(p)}: ensured presets and ${PLUGIN_NAME}`);
     return;
   }
 
@@ -181,7 +182,6 @@ log(`Using project root: ${ROOT}`);
       let localChanged = false;
 
       function appendIntoPluginsBlock(source, blockLabelRegex) {
-        // Matches the start of the object literal and captures its body
         return source.replace(blockLabelRegex, (whole, head, body) => {
           const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
           if (pluginsRx.test(body)) {
@@ -197,7 +197,6 @@ log(`Using project root: ${ROOT}`);
               return `plugins: [${innerNoTrailWS}${sep}'${PLUGIN_NAME}']`;
             });
           } else {
-            // No plugins array: insert one at the top of the object literal body
             localChanged = true;
             body = body.replace(/^\s*/, match => `${match}plugins: ['${PLUGIN_NAME}'],\n`);
           }
@@ -205,8 +204,6 @@ log(`Using project root: ${ROOT}`);
         });
       }
 
-      // Find the env.commonjs block only (do not touch browser/esm/etc.)
-      // This regex targets the inner object for the "commonjs" env key.
       const envCommonjs = /(\bcommonjs\s*:\s*\{\s*)([\s\S]*?)\}/m;
       if (envCommonjs.test(src)) {
         src = appendIntoPluginsBlock(src, envCommonjs);
@@ -215,8 +212,7 @@ log(`Using project root: ${ROOT}`);
       if (localChanged) changed = true;
     })();
 
-    // 2a) If we didn't inject via env.commonjs (plugin still not present),
-    // ensure a TOP-LEVEL plugins array contains our plugin (generic fallback).
+    // 2a) Ensure top-level plugins contains our plugin (fallback)
     if (!src.includes(PLUGIN_NAME)) {
       const pluginsArrayRegex = /plugins\s*:\s*\[([\s\S]*?)\]/m;
       if (pluginsArrayRegex.test(src)) {
@@ -230,7 +226,6 @@ log(`Using project root: ${ROOT}`);
         });
         changed = true;
       } else {
-        // Insert a new top-level plugins array if there isn't one anywhere
         let inserted = false;
         src = src.replace(/return\s*\{\s*/m, (mm) => {
           inserted = true;
@@ -245,7 +240,7 @@ log(`Using project root: ${ROOT}`);
       }
     }
 
-    // 2b) Avoid duplicating preset-env: ONLY add if completely missing
+    // 2b) Ensure @babel/preset-env exists
     if (!/['"]@babel\/preset-env['"]/.test(src)) {
       const presetsRegex = /presets\s*:\s*\[/m;
       if (presetsRegex.test(src)) {
@@ -270,27 +265,66 @@ log(`Using project root: ${ROOT}`);
       changed = true;
     }
 
+    // 2c) If TypeScript is present, ensure @babel/preset-typescript exists
+    if (typescriptPresent && !/['"]@babel\/preset-typescript['"]/.test(src)) {
+      const presetsArrayRegex = /presets\s*:\s*\[([\s\S]*?)\]/m;
+      if (presetsArrayRegex.test(src)) {
+        src = src.replace(presetsArrayRegex, (m, inner) => {
+          if (inner.includes(`'@babel/preset-typescript'`) || inner.includes(`"@babel/preset-typescript"`)) return m;
+          const trimmed = inner.trim();
+          const hasTrailingComma = /,\s*$/.test(inner);
+          const innerNoTrailWS = inner.replace(/\s*$/, '');
+          const sep = trimmed ? (hasTrailingComma ? ' ' : ', ') : '';
+          return `presets: [${innerNoTrailWS}${sep}["@babel/preset-typescript", { allowDeclareFields: true }]]`;
+        });
+      } else {
+        let inserted = false;
+        src = src.replace(/return\s*\{\s*/m, (mm) => {
+          inserted = true;
+          return `${mm}
+  presets: [
+    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
+    ["@babel/preset-typescript", { allowDeclareFields: true }]
+  ],`;
+        });
+        if (!inserted) {
+          src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
+            return `${mm}
+  presets: [
+    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
+    ["@babel/preset-typescript", { allowDeclareFields: true }]
+  ],`;
+          });
+        }
+      }
+      changed = true;
+    }
+
     if (changed) {
       writeIfChanged(targetPath, src);
-      log(`Updated ${path.basename(targetPath)}: ensured ${PLUGIN_NAME} in env.commonjs (or top-level fallback) and no duplicate preset-env`);
+      log(`Updated ${path.basename(targetPath)}: ensured presets/plugins (incl. TS when present).`);
     } else {
-      log(`${path.basename(targetPath)} already contains ${PLUGIN_NAME} and preset-env`);
+      log(`${path.basename(targetPath)} already contains required presets/plugins.`);
     }
     return;
   }
 
-  // 3) No config found → create a minimal one
+  // 3) No config found → create a minimal one (include TS preset if TS present)
+  const typescriptPresentMinimal = hasAnyDep('typescript');
   const minimal =
 `module.exports = {
   presets: [
-    ["@babel/preset-env", { targets: { node: "current" }, modules: false }]
+    ["@babel/preset-env", { targets: { node: "current" }, modules: false }]${
+      typescriptPresentMinimal ? `,
+    ["@babel/preset-typescript", { allowDeclareFields: true }]` : ''
+    }
   ],
   plugins: ['${PLUGIN_NAME}'],
   comments: true
 };
 `;
   fs.writeFileSync(targetPath, minimal);
-  log(`Created ${path.basename(targetPath)} (minimal, includes ${PLUGIN_NAME})`);
+  log(`Created ${path.basename(targetPath)} (minimal, includes ${PLUGIN_NAME}${typescriptPresentMinimal ? ' + preset-typescript' : ''}).`);
 })();
 
 
@@ -309,7 +343,6 @@ log(`Using project root: ${ROOT}`);
   const hasTsJest = hasAnyDep('ts-jest');
   const usesTS = hasAnyDep('typescript') || hasTsJest || hasAnyDep('@types/jest');
 
-  // Ensure Babel bits (ts projects also need preset-typescript)
   if (!hasAnyDep('@babel/core')) {
     log('Missing @babel/core for Jest/Babel.');
     tryInstall(['@babel/core'], true);
@@ -320,16 +353,12 @@ log(`Using project root: ${ROOT}`);
   if (usesTS && !hasAnyDep('@babel/preset-typescript')) {
     tryInstall(['@babel/preset-typescript'], true);
   }
-  // Docblock reader used by many tag parsers
   if (!hasAnyDep('jest-docblock')) {
     tryInstall(['jest-docblock'], true);
   }
 
-  // If project has NO explicit Jest config file but DOES have a package.json "jest" block,
-  // prefer to edit that in-place to enable Babel in ts-jest.
   const pkgHasInlineJest = !!freshPkg.jest && typeof freshPkg.jest === 'object';
 
-  // --- NEW: migrate misplaced top-level globals['ts-jest'] into jest.globals['ts-jest']
   if (pkgHasInlineJest && freshPkg.globals && freshPkg.globals['ts-jest']) {
     updatePkg((p) => {
       p.jest = p.jest || {};
@@ -337,7 +366,6 @@ log(`Using project root: ${ROOT}`);
       const fromTop = p.globals && p.globals['ts-jest'] || {};
       const current = p.jest.globals['ts-jest'] || {};
       p.jest.globals['ts-jest'] = Object.assign({}, current, fromTop, { babelConfig: true });
-      // cleanup top-level if empty after move
       if (p.globals) {
         delete p.globals['ts-jest'];
         if (Object.keys(p.globals).length === 0) delete p.globals;
@@ -347,29 +375,23 @@ log(`Using project root: ${ROOT}`);
     log('Moved top-level globals.ts-jest → jest.globals["ts-jest"] with babelConfig:true');
   }
 
-  // If no inline jest block and no file config, we will create jest.config.js below.
   const JEST_FILES = ['jest.config.js', 'jest.config.cjs'].map(f => path.join(ROOT, f));
   const jestCfgPath = JEST_FILES.find(exists);
 
   if (pkgHasInlineJest) {
-    // Mutate inline package.json jest safely (fresh read/write)
     updatePkg((p) => {
       p.jest = p.jest || {};
-      // Keep existing transforms; ensure ts-jest path has Babel enabled
       if (hasTsJest) {
         p.jest.transform = p.jest.transform || {};
-        // Respect existing ts-jest transform if present; otherwise set it
         const tsKey = '^.+\\.ts$';
         if (!p.jest.transform[tsKey]) {
           p.jest.transform[tsKey] = 'ts-jest';
         }
-        // >>> FIX: write under jest.globals (not top-level)
         p.jest.globals = p.jest.globals || {};
         const cur = p.jest.globals['ts-jest'] || {};
         p.jest.globals['ts-jest'] = Object.assign({}, cur, { babelConfig: true });
         log('Enabled ts-jest → Babel pass via package.json jest.globals["ts-jest"].babelConfig');
       } else {
-        // Fallback to babel-jest if no ts-jest
         p.jest.transform = p.jest.transform || {};
         const KEY = '^.+\\.[jt]sx?$';
         if (p.jest.transform[KEY] !== 'babel-jest') {
@@ -386,18 +408,15 @@ log(`Using project root: ${ROOT}`);
   }
 
   if (jestCfgPath) {
-    // Jest config file exists; try a gentle augmentation only if it's our auto-generated file
     const src = read(jestCfgPath);
     if (/Auto-generated by js-sanitizer setup/.test(src)) {
       let out = src;
       if (hasTsJest) {
-        // Swap to ts-jest with babel pass if our file used babel-jest
         out = out.replace(
           /transform:\s*\{[^}]*\}/m,
           `transform: { '^.+\\\\.ts$': 'ts-jest' },\n  globals: { 'ts-jest': { babelConfig: true } }`
         );
       } else {
-        // Ensure babel-jest present for JS projects
         if (!hasAnyDep('babel-jest')) tryInstall(['babel-jest'], true);
       }
       writeIfChanged(jestCfgPath, out);
@@ -408,7 +427,6 @@ log(`Using project root: ${ROOT}`);
     return;
   }
 
-  // No config anywhere → create a minimal jest.config.js fit for the project
   const newCfg = hasTsJest
     ? `/** Auto-generated by js-sanitizer setup */
 module.exports = {
@@ -437,7 +455,6 @@ module.exports = {
     return;
   }
 
-  // The sanitizer plugin needs jest-docblock at runtime
   if (!hasAnyDep('jest-docblock')) {
     tryInstall(['jest-docblock'], true);
   }
@@ -452,20 +469,16 @@ module.exports = {
 
   const BABEL_REGISTER = path.join(ROOT, 'babel.register.js');
 
-  // Force-load the sanitizer for Mocha specs *even if* the project’s Babel config is complicated.
-  // This does NOT mutate the app’s Webpack builds; it only affects Mocha’s on-the-fly transpilation.
   const regContent =
 `// Auto-generated by js-sanitizer setup
 try {
   require('@babel/register')({
     extensions: ['.js', '.jsx', '.ts', '.tsx'],
     cache: true,
-    // Reuse local babel config if present, but force-append the sanitizer plugin for tests:
     babelrc: true,
     configFile: true,
     plugins: (function () {
       try {
-        // Try to avoid duplicate insertion if project already includes it
         const cfg = require('./babel.config.js') || require('./babel.config.cjs');
         const list = (cfg && cfg.plugins) || [];
         const has = Array.isArray(list) && list.some(p =>
@@ -483,7 +496,6 @@ try {
 }`;
   writeIfChanged(BABEL_REGISTER, regContent);
 
-  // Detect Mocha major version to decide config style (.mocharc vs mocha.opts)
   let mochaMajor = null;
   try {
     const pjson = readJSON(PKG_PATH) || {};
@@ -494,7 +506,6 @@ try {
     mochaMajor = m ? parseInt(m[0], 10) : null;
   } catch {}
 
-  // Mocha ≥6 supports .mocharc.*; older versions typically use mocha.opts
   if (mochaMajor && mochaMajor >= 6) {
     const MOCHA_RC = path.join(ROOT, '.mocharc.json');
     let mocharc = exists(MOCHA_RC) ? readJSON(MOCHA_RC) : {};
@@ -502,10 +513,8 @@ try {
     req.add('./babel.register.js');
     mocharc.require = Array.from(req);
     writeJSON(MOCHA_RC, mocharc);
-    log('Ensured .mocharc.json requires ./babel.register.js (Babel active for Mocha ≥6).');
+    log('Ensured .mocharc.json requires ./babel.register.js (Mocha ≥6).');
   } else {
-    // Legacy fallback: create/update mocha.opts (Mocha 3–5)
-    // Put it in ./test or project root; prefer ./test if it exists
     const testDir = exists(path.join(ROOT, 'test')) ? path.join(ROOT, 'test') : ROOT;
     const OPTS = path.join(testDir, 'mocha.opts');
     let content = exists(OPTS) ? read(OPTS) : '';
@@ -519,7 +528,6 @@ try {
     }
   }
 })();
-
 
 /* ----------------------------------------
  * 4) Vitest wiring (self-healing config + ensure vite-plugin-babel)
@@ -540,7 +548,6 @@ try {
     }
   }
 
-  // Ensure vite-plugin-babel is recorded and (optionally) installed.
   if (!hasAnyDep('vite-plugin-babel')) {
     log('vite-plugin-babel not found; adding to devDependencies.');
     ensureDevDepInPkg('vite-plugin-babel', '*');
@@ -613,7 +620,6 @@ export default defineConfig(async () => {
     log(`Created ${path.basename(outPath)} with conditional vite-plugin-babel wiring.`);
   }
 
-  // ---- IMPORTANT: write to package.json using updatePkg (fresh read) ----
   updatePkg((p) => {
     p.vitest = p.vitest || {};
     const s = new Set(ensureArray(p.vitest.setupFiles));
@@ -623,7 +629,6 @@ export default defineConfig(async () => {
   });
   log('Added ./vitest.setup.js to package.json → vitest.setupFiles');
 
-  // Ensure setup file exists
   const setupPath = path.join(ROOT, 'vitest.setup.js');
   if (!exists(setupPath)) {
     writeIfChanged(setupPath, `// Auto-generated by js-sanitizer setup
