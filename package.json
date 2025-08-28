@@ -5,6 +5,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js"
+    "./setup.js": "./setup.js"
   },
   "type": "commonjs",
   "files": [
