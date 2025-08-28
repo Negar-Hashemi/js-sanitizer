@@ -120,6 +120,185 @@ The `setup.js` script automatically configures the correct integration:
 
 ---
 
+# js-sanitizer: Framework Integration
+
+The plugin works with **Jest**, **Mocha**, and **Vitest**.
+
+---
+
+## What `setup.js` Does Automatically
+
+### Jest
+- Detects Jest (dependency or `scripts.test`).
+- Ensures **Babel** is active via `babel-jest` (or `ts-jest` with a Babel pass).
+- If no config exists, creates a minimal `jest.config.js`.
+- If a config exists, it won’t overwrite it; just make sure:
+  - `transform` includes `babel-jest`, **or**
+  - `ts-jest` has `globals['ts-jest'].babelConfig = true`.
+- Ensures `@babel/preset-env` is present.  
+  Adds `@babel/preset-typescript` if the project uses TypeScript.
+
+### Mocha
+- Generates `babel.register.js` to hook Babel at runtime (tests only).
+- Adds `--require ./babel.register.js`:
+  - For Mocha ≥ 6: updates/creates `.mocharc.json`.
+  - For older Mocha: updates/creates `mocha.opts`.
+- Ensures `jest-docblock` (for tag parsing) and `@babel/register` are available.
+- Ensures `@babel/preset-env` and (if TS present) `@babel/preset-typescript`.
+
+### Vitest
+- Creates `vitest.setup.js` so a setup file always exists.
+- Adds `vitest.setupFiles` to your `package.json` (non-destructive merge).
+- If the workspace runs Vitest, enables `vite-plugin-babel` so Babel plugins (like `module:js-sanitizer`) run on test files.
+- Does **not** overwrite existing `vitest.config.ts` / `vitest.config.*`.
+- Ensures `@babel/preset-env` and (if TS present) `@babel/preset-typescript`.
+
+---
+
+## Manual Setup
+
+If you don’t want to run `setup.js`, here’s how to set things up yourself.
+
+### Common Prerequisites
+
+Install Babel core + presets (and TS preset if your tests are TypeScript):
+
+```bash
+npm i -D @babel/core @babel/preset-env @babel/preset-typescript
+```
+
+Create a Babel config:
+
+```js
+// babel.config.js (or .cjs / .babelrc)
+module.exports = {
+  presets: [
+    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
+    ["@babel/preset-typescript", { allowDeclareFields: true }] // if using TypeScript
+  ],
+  plugins: ["module:js-sanitizer"],
+  comments: true
+};
+```
+
+---
+
+### Jest (Manual)
+
+Install a transformer:
+
+```bash
+# For JS projects:
+npm i -D babel-jest
+
+# For TS projects already using ts-jest:
+npm i -D ts-jest
+```
+
+Config options:
+
+```js
+// jest.config.js (JS projects)
+module.exports = {
+  testEnvironment: 'node',
+  transform: { '^.+\.[jt]sx?$': 'babel-jest' },
+};
+```
+
+```js
+// jest.config.js (TS projects with ts-jest)
+module.exports = {
+  testEnvironment: 'node',
+  transform: { '^.+\.ts$': 'ts-jest' },
+  globals: { 'ts-jest': { babelConfig: true } },
+};
+```
+
+---
+
+### Mocha (Manual)
+
+Install runtime hook:
+
+```bash
+npm i -D @babel/register jest-docblock
+```
+
+Create `babel.register.js`:
+
+```js
+// babel.register.js
+require('@babel/register')({
+  extensions: ['.js', '.jsx', '.ts', '.tsx'],
+  cache: true,
+  babelrc: true,
+  configFile: true,
+});
+```
+
+Tell Mocha to require it:
+
+- **Mocha ≥ 6**: `.mocharc.json`
+  ```json
+  { "require": ["./babel.register.js"] }
+  ```
+- **Older Mocha**: `mocha.opts`
+  ```
+  --require ./babel.register.js
+  ```
+
+---
+
+### Vitest (Manual)
+
+Install the Vite plugin:
+
+```bash
+npm i -D vite-plugin-babel
+```
+
+Configure Vitest:
+
+```ts
+// vitest.config.ts
+import { defineConfig } from 'vitest/config'
+import babel from 'vite-plugin-babel'
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    setupFiles: ['./vitest.setup.js'],
+  },
+  plugins: [
+    babel({
+      filter: /\.(test|spec)\.(js|ts|jsx|tsx)$/,
+      babelConfig: { configFile: true, babelrc: true },
+    }),
+  ],
+})
+```
+
+Create `vitest.setup.js` (can be empty):
+
+```js
+// vitest.setup.js
+// optional: globals/mocks
+// DO NOT call @babel/register here (vite-plugin-babel already handles Babel)
+```
+
+---
+
+## Notes & Gotchas
+
+- **Monorepos / workspaces**: if tests run from a workspace without a local `vitest` dep, still create `vitest.setup.js` in that workspace and reference it in `package.json` or `vitest.config.*`.  
+- **Windows CI**: if tests write to `D:\tmp\…`, create the directory first:
+  ```pwsh
+  New-Item -ItemType Directory -Path 'D:\tmp' -Force | Out-Null
+  ```
+- Do **not** mix `@babel/register` with Vitest’s `vite-plugin-babel` — that can cause double transforms.  
+- For TypeScript tests, include `@babel/preset-typescript` so your Babel plugins also apply to `.ts` tests.
+
+
 ## Logs of Skipped Tests
 
 During test execution, skipped tests will log messages like:
