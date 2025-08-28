@@ -4,7 +4,7 @@
   "description": "Babel plugin that conditionally skips tests (test/it/describe) based on docblock tags like @skipOnOS, @enabledOnBrowser, etc.",
   "main": "index.js",
   "exports": {
-    ".": "./index.js"
+    ".": "./index.js",
     "./setup.js": "./setup.js"
   },
   "type": "commonjs",
