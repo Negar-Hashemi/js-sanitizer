@@ -11,7 +11,40 @@ const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
 
-const ROOT = process.env.INIT_CWD || process.cwd();
+const ROOT = (() => {
+  // 1) If we're installed in <consumer>/node_modules/js-sanitizer,
+  //    two levels up is the consumer package root.
+  const twoUp = path.resolve(__dirname, '..', '..');
+  if (
+    fs.existsSync(path.join(twoUp, 'package.json')) &&
+    !/node_modules[\\/]/.test(twoUp) // guard against odd layouts
+  ) {
+    return twoUp;
+  }
+
+  // 2) npm/pnpm/yarn set this to the package being installed INTO
+  const localPrefix = process.env.npm_config_local_prefix;
+  if (
+    localPrefix &&
+    fs.existsSync(path.join(localPrefix, 'package.json')) &&
+    // ensure it's not our own package folder (dependency)
+    path.basename(localPrefix) !== 'js-sanitizer'
+  ) {
+    return localPrefix;
+  }
+
+  // 3) INIT_CWD is often the monorepo root; still better than CWD in postinstall
+  if (
+    process.env.INIT_CWD &&
+    fs.existsSync(path.join(process.env.INIT_CWD, 'package.json'))
+  ) {
+    return process.env.INIT_CWD;
+  }
+
+  // 4) Last resort
+  return process.cwd();
+})();
+
 const PKG_PATH = path.join(ROOT, 'package.json');
 const PLUGIN_NAME = 'module:js-sanitizer';
 
