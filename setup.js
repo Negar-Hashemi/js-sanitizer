@@ -579,7 +579,27 @@ function isIgnoredFile(filename) {
   if (lower.includes(sep + 'build' + sep)) return true;
   if (lower.includes(sep + 'out' + sep)) return true;
   if (lower.includes(sep + 'js-sanitizer' + sep)) return true; // avoid reentrant plugin
-  if (/[\\\\/]\\.(git|hg|svn)[\\\\/]/i.test(filename)) return true;
+  if (/[\\/]\.(git|hg|svn)[\\/]/i.test(filename)) return true;
+  return false;
+}
+
+// NEW: skip Rollup test fixtures / samples so “helpful error” tests still fail as intended
+function isTestFixture(filename) {
+  if (!filename) return false;
+  const lower = filename.toLowerCase();
+  const sep = path.sep;
+
+  // only if path is under the test tree
+  if (!lower.includes(sep + 'test' + sep)) return false;
+
+  // common fixture folders in Rollup tests
+  if (lower.includes(sep + 'samples' + sep)) return true;
+  if (lower.includes(sep + 'fixtures' + sep)) return true;
+
+  // typical config filenames used as samples
+  const base = path.basename(lower);
+  if (/^(rollup|vite|webpack)\.config\.[cm]?[jt]sx?$/.test(base)) return true;
+
   return false;
 }
 
@@ -618,8 +638,8 @@ function compileFile(code, filename) {
     try { tsPreset = require.resolve('@babel/preset-typescript'); }
     catch {
       throw new Error(
-        \`[js-sanitizer] TypeScript file "\${path.relative(process.cwd(), filename)}" detected. \` +
-        \`Please install @babel/preset-typescript: npm i -D @babel/preset-typescript\`
+        `[js-sanitizer] TypeScript file "${path.relative(process.cwd(), filename)}" detected. ` +
+        `Please install @babel/preset-typescript: npm i -D @babel/preset-typescript`
       );
     }
     opts.presets = [tsPreset];
@@ -635,7 +655,9 @@ function compileFile(code, filename) {
 for (const ext of EXTS) {
   const prior = Module._extensions[ext] || Module._extensions['.js'];
   Module._extensions[ext] = function registerHook(mod, filename) {
-    if (isIgnoredFile(filename)) return prior(mod, filename);
+    if (isIgnoredFile(filename) || isTestFixture(filename)) {
+      return prior(mod, filename);
+    }
     const src = fs.readFileSync(filename, 'utf8');
     const compiled = compileFile(src, filename);
     mod._compile(compiled, filename);
@@ -672,6 +694,7 @@ console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
     console.warn('[js-sanitizer] Could not register ESM loader:', e?.message || e);
   }
 })();
+
 `;
   writeIfChanged(REGISTER_PATH, registerSrc);
   log('Ensured babel.register.cjs');
