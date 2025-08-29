@@ -513,7 +513,7 @@ try {
     configFile: false,
     comments: true,
     plugins: [
-      require.resolve('./sanitizer.js'),
+      'module:js-sanitizer',
       [require.resolve('@babel/plugin-transform-modules-commonjs'), { loose: true }],
     ],
   });
