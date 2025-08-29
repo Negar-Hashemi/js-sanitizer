@@ -447,118 +447,188 @@ module.exports = {
 })();
 
 /* ----------------------------------------
- * 3) Mocha wiring (@babel/register) — CJS-safe + migration
+ * 3) Mocha wiring (require + node-option loader)
  * --------------------------------------*/
 (function ensureMocha() {
-  if (!hasAnyDep('mocha')) {
-    log('Mocha not detected — skipping Mocha wiring.');
+  const absRegister = path.resolve(ROOT, 'babel.register.cjs');
+  const absLoader   = path.resolve(ROOT, 'sanitizer.esm.loader.mjs');
+
+  // --- helpers to patch JS config safely ---
+  function escapeForRx(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  function hasStringInArray(inner, value) {
+    const rx = new RegExp(`['"\`]${escapeForRx(value)}['"\`]`);
+    return rx.test(inner);
+  }
+
+  function insertIntoArrayLiteral(src, keyRegex, value) {
+    // keyRegex must match "<key> : [ ... ]" and capture the array body as group 1
+    return src.replace(keyRegex, (whole, inner) => {
+      if (hasStringInArray(inner, value)) return whole; // already present
+      const trimmed = inner.trim();
+      const hasTrailingComma = /,\s*$/.test(inner);
+      const sep = trimmed ? (hasTrailingComma ? ' ' : ', ') : '';
+      return whole.replace(inner, inner.replace(/\s*$/, '') + sep + JSON.stringify(value));
+    });
+  }
+
+  function injectArrayFieldIntoObject(src, objectHeaderRx, fieldKeyLiteral, value) {
+    // Add "<fieldKey>: [ 'value' ]," right after object start if field missing
+    const fieldRx = new RegExp(`${fieldKeyLiteral}\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'm');
+    if (fieldRx.test(src)) return src; // already present; caller should have handled appending value
+    return src.replace(objectHeaderRx, (mm) => {
+      const line = `\n  ${fieldKeyLiteral}: [${JSON.stringify(value)}],`;
+      return mm + line;
+    });
+  }
+
+  function normalizeNodeOptionArrayLiterals(src) {
+    // Strip accidentally written leading "--" inside values; Mocha adds them itself.
+    // Matches: 'node-option': [ '--loader=...' , '--inspect=...' ]
+    const rx = /(['"]node-option['"])\s*:\s*\[([\s\S]*?)\]/m;
+    return src.replace(rx, (m, key, inner) => {
+      const fixed = inner.replace(/(['"`])--+/g, '$1'); // "--loader=..." -> "loader=..."
+      return `${key}: [${fixed}]`;
+    });
+  }
+
+  function patchMochaJsConfig(jsCfgPath) {
+    let src = read(jsCfgPath);
+    let changed = false;
+
+    // 1) Normalize any bad "--" in existing node-option entries
+    const normalized = normalizeNodeOptionArrayLiterals(src);
+    if (normalized !== src) { src = normalized; changed = true; }
+
+    // Regexes for existing array fields
+    const requireArrayRx   = /(?:^|\n)\s*require\s*:\s*\[([\s\S]*?)\]/m;
+    const nodeOptionArrayRx= /(?:^|\n)\s*['"]node-option['"]\s*:\s*\[([\s\S]*?)\]/m;
+
+    // 2) Append values if arrays exist
+    if (requireArrayRx.test(src)) {
+      const before = src;
+      src = insertIntoArrayLiteral(src, requireArrayRx, absRegister);
+      if (src !== before) changed = true;
+    }
+    if (nodeOptionArrayRx.test(src)) {
+      const before = src;
+      src = insertIntoArrayLiteral(src, nodeOptionArrayRx, `loader=${absLoader}`);
+      if (src !== before) changed = true;
+    }
+
+    // 3) If fields missing, inject them at start of exported object
+    const cjsHeaderRx = /module\.exports\s*=\s*\{\s*/m;
+    const esmHeaderRx = /export\s+default\s*\{\s*/m;
+
+    if (!requireArrayRx.test(src)) {
+      if (cjsHeaderRx.test(src)) {
+        const before = src;
+        src = injectArrayFieldIntoObject(src, cjsHeaderRx, 'require', absRegister);
+        if (src !== before) changed = true;
+      } else if (esmHeaderRx.test(src)) {
+        const before = src;
+        src = injectArrayFieldIntoObject(src, esmHeaderRx, 'require', absRegister);
+        if (src !== before) changed = true;
+      }
+    }
+
+    if (!nodeOptionArrayRx.test(src)) {
+      if (cjsHeaderRx.test(src)) {
+        const before = src;
+        src = injectArrayFieldIntoObject(src, cjsHeaderRx, `'node-option'`, `loader=${absLoader}`);
+        if (src !== before) changed = true;
+      } else if (esmHeaderRx.test(src)) {
+        const before = src;
+        src = injectArrayFieldIntoObject(src, esmHeaderRx, `'node-option'`, `loader=${absLoader}`);
+        if (src !== before) changed = true;
+      }
+    }
+
+    if (changed) {
+      writeIfChanged(jsCfgPath, src);
+      log(`Patched ${path.basename(jsCfgPath)} with require + node-option loader.`);
+    } else {
+      log(`${path.basename(jsCfgPath)} already includes sanitizer wiring.`);
+    }
+  }
+
+  function patchMochaJsonConfig(jsonPath) {
+    const mocharc = exists(jsonPath) ? (readJSON(jsonPath) || {}) : {};
+    const req = new Set(ensureArray(mocharc.require));
+    req.add(absRegister);
+    mocharc.require = Array.from(req);
+
+    const nodeOpts = new Set(
+      ensureArray(mocharc['node-option']).map(s => String(s).replace(/^\s*--+/, '')) // strip leading "--"
+    );
+    nodeOpts.add(`loader=${absLoader}`);
+    mocharc['node-option'] = Array.from(nodeOpts);
+
+    writeJSON(jsonPath, mocharc);
+    log(`Patched ${path.basename(jsonPath)} with require + node-option loader.`);
+  }
+
+  function ensureMochaOpts() {
+    // Legacy Mocha (<6): mocha.opts (often under ./test)
+    const testDir = exists(path.join(ROOT, 'test')) ? path.join(ROOT, 'test') : ROOT;
+    const OPTS = path.join(testDir, 'mocha.opts');
+    if (!exists(OPTS)) return false;
+    let content = read(OPTS);
+
+    // ensure --require line (use absolute path to be robust)
+    const requireLine = `--require ${absRegister}`;
+    if (!new RegExp(`^\\s*${escapeForRx(requireLine)}\\s*$`, 'm').test(content)) {
+      if (content && !content.endsWith('\n')) content += '\n';
+      content += requireLine + '\n';
+    }
+
+    // best-effort node-option (older Mocha might ignore; harmless)
+    const nodeOptLine = `--node-option loader=${absLoader}`;
+    if (!new RegExp(`^\\s*${escapeForRx(nodeOptLine)}\\s*$`, 'm').test(content)) {
+      content += nodeOptLine + '\n';
+    }
+
+    writeIfChanged(OPTS, content);
+    log(`Ensured sanitizer wiring in ${path.relative(ROOT, OPTS)} (legacy mocha.opts).`);
+    return true;
+  }
+
+  // --- choose the best target to patch/create, honoring Mocha's priority ---
+  const jsCfg = ['.mocharc.js', '.mocharc.cjs', '.mocharc.mjs']
+    .map(f => path.join(ROOT, f))
+    .find(exists);
+
+  const jsonCfg = path.join(ROOT, '.mocharc.json');
+
+  if (jsCfg) {
+    patchMochaJsConfig(jsCfg);
     return;
   }
 
-  // Make sure we have the small bits we rely on
-  if (!hasAnyDep('jest-docblock')) {
-    tryInstall(['jest-docblock'], true);
+  if (exists(jsonCfg)) {
+    patchMochaJsonConfig(jsonCfg);
+    return;
   }
 
-  if (!hasAnyDep('@babel/register')) {
-    log('Missing @babel/register for Mocha.');
-    tryInstall(['@babel/register'], true);
-    if (!hasAnyDep('@babel/register')) {
-      log('WARNING: @babel/register not found. Install: npm i -D @babel/register');
-    }
-  }
+  // Fall back to legacy mocha.opts if it exists and no modern config is present
+  if (ensureMochaOpts()) return;
 
-  // Always use a CJS file so "require(...)" works even in ESM repos
-  const BABEL_REGISTER_CJS = path.join(ROOT, 'babel.register.cjs');
-  const LEGACY_REGISTER_JS = path.join(ROOT, 'babel.register.js');
+  // No config at all → create a minimal .mocharc.cjs (JS is most flexible)
+  const NEW = path.join(ROOT, '.mocharc.cjs');
+  const content = `// Auto-generated by js-sanitizer setup
+const path = require('path');
 
-  // If old JS register exists and CJS doesn't, migrate it
-  if (exists(LEGACY_REGISTER_JS) && !exists(BABEL_REGISTER_CJS)) {
-    try {
-      fs.renameSync(LEGACY_REGISTER_JS, BABEL_REGISTER_CJS);
-      log('Renamed babel.register.js → babel.register.cjs for ESM compatibility');
-    } catch (e) {
-      // If rename fails for any reason, we will overwrite/write the CJS file below.
-    }
-  }
-
-  const regContentCJS =
-`// Auto-generated by js-sanitizer setup (CJS-safe)
-try {
-  require('@babel/register')({
-    extensions: ['.js', '.jsx', '.ts', '.tsx', '.cjs', '.mjs'],
-    cache: true,
-    babelrc: true,
-    configFile: true,
-    // Avoid double-injecting the sanitizer plugin: only add if not present in babel config
-    plugins: (function () {
-      try {
-        let cfg = null;
-        try { cfg = require('./babel.config.cjs'); } catch {}
-        if (!cfg) { try { cfg = require('./babel.config.js'); } catch {} }
-        const list = (cfg && cfg.plugins) || [];
-        const has = Array.isArray(list) && list.some(p =>
-          (typeof p === 'string' && p === '${PLUGIN_NAME}') ||
-          (Array.isArray(p) && p[0] === '${PLUGIN_NAME}')
-        );
-        return has ? [] : ['${PLUGIN_NAME}'];
-      } catch {
-        return ['${PLUGIN_NAME}'];
-      }
-    })()
-  });
-} catch (e) {
-  console.warn('[js-sanitizer] Mocha: @babel/register not found or failed. Install with: npm i -D @babel/register');
-  console.log('[js-sanitizer]:'+ e)
-}
+module.exports = {
+  require: [path.resolve(__dirname, 'babel.register.cjs')],
+  'node-option': [\`loader=\${path.resolve(__dirname, 'sanitizer.esm.loader.mjs')}\`],
+  // Keep globs out of config; let scripts decide test files.
+  extension: ['js','cjs','mjs','ts','tsx','jsx']
+};
 `;
-  writeIfChanged(BABEL_REGISTER_CJS, regContentCJS);
-
-  // Detect Mocha major version (best-effort; only used to decide mocharc vs mocha.opts)
-  let mochaMajor = null;
-  try {
-    const pjson = readJSON(PKG_PATH) || {};
-    const ver = (pjson.devDependencies && pjson.devDependencies.mocha)
-             || (pjson.dependencies && pjson.dependencies.mocha)
-             || '';
-    const m = String(ver).match(/\d+/);
-    mochaMajor = m ? parseInt(m[0], 10) : null;
-  } catch {}
-
-  // Prefer .mocharc.json for Mocha >= 6; otherwise fall back to mocha.opts
-  if (mochaMajor && mochaMajor >= 6) {
-    const MOCHA_RC = path.join(ROOT, '.mocharc.json');
-    let mocharc = exists(MOCHA_RC) ? readJSON(MOCHA_RC) : {};
-    const req = new Set(ensureArray(mocharc.require));
-    // Remove old .js reference if present; prefer .cjs
-    req.delete('./babel.register.js');
-    req.add('./babel.register.cjs');
-    mocharc.require = Array.from(req);
-    writeJSON(MOCHA_RC, mocharc);
-    log('Ensured .mocharc.json requires ./babel.register.cjs (Mocha ≥6).');
-  } else {
-    // Legacy Mocha (<6): use mocha.opts
-    const testDir = exists(path.join(ROOT, 'test')) ? path.join(ROOT, 'test') : ROOT;
-    const OPTS = path.join(testDir, 'mocha.opts');
-    let content = exists(OPTS) ? read(OPTS) : '';
-
-    // Remove any line requiring the old .js file
-    content = content.replace(/^-{1,2}require\s+\.\/babel\.register\.js\s*$/m, '').trimEnd();
-
-    // Ensure a trailing newline
-    if (content && !content.endsWith('\n')) content += '\n';
-
-    // Add the .cjs require if not present
-    if (!/^-{1,2}require\s+\.\/babel\.register\.cjs\s*$/m.test(content)) {
-      content += `--require ./babel.register.cjs\n`;
-      writeIfChanged(OPTS, content);
-      log(`Ensured "--require ./babel.register.cjs" in ${path.relative(ROOT, OPTS)} (Mocha <6).`);
-    } else {
-      writeIfChanged(OPTS, content); // in case we removed old .js line above
-      log(`mocha.opts already requires ./babel.register.cjs (Mocha <6).`);
-    }
-  }
+  writeIfChanged(NEW, content);
+  log('Created .mocharc.cjs with sanitizer wiring.');
 })();
+
 
 
 /* ----------------------------------------
