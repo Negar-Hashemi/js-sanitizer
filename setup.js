@@ -512,6 +512,10 @@ try {
     babelrc: false,
     configFile: false,
     comments: true,
+    parserOpts: {
+    allowReturnOutsideFunction: true,
+    sourceType: 'unambiguous',
+  },
     plugins: [
       'module:js-sanitizer',
       [require.resolve('@babel/plugin-transform-modules-commonjs'), { loose: true }],
