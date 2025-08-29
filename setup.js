@@ -451,10 +451,48 @@ module.exports = {
  * --------------------------------------*/
 (function ensureMocha() {
   const absRegister = path.resolve(ROOT, 'babel.register.cjs');
-  const absLoader   = path.resolve(ROOT, 'sanitizer.esm.loader.mjs');
+  const absLoader   = resolveLoaderPath();
 
   // --- helpers to patch JS config safely ---
   function escapeForRx(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  function ensureLocalLoaderFile() {
+  const p = path.join(ROOT, 'sanitizer.esm.loader.mjs');
+  const content = `import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import * as babel from '@babel/core';
+const JS_EXT = new Set(['.js', '.mjs', '.jsx']);
+const TS_EXT = new Set(['.ts', '.tsx']);
+export async function resolve(s,c,d){ return d(s,c,d); }
+export async function load(u,c,d){ return d(u,c,d); }
+export async function transformSource(src, ctx, next){
+  const { url, format } = ctx;
+  if (!url.startsWith('file://')) return next(src, ctx, next);
+  const filename = fileURLToPath(url);
+  const ext = path.extname(filename).toLowerCase();
+  if (!JS_EXT.has(ext) && !TS_EXT.has(ext)) return next(src, ctx, next);
+  const code = typeof src === 'string' ? src : Buffer.from(src).toString('utf8');
+  const result = await babel.transformAsync(code, {
+    filename, babelrc:false, configFile:false, comments:true,
+    parserOpts:{ sourceType:'unambiguous', plugins:[...(JS_EXT.has(ext)?['jsx']:['typescript','jsx']),'classProperties','classPrivateProperties','classPrivateMethods','topLevelAwait','importMeta'] },
+    plugins:['module:js-sanitizer'],
+  });
+  return { source: result?.code ?? code, format };
+}`;
+  writeIfChanged(p, content);
+  return p;
+}
+
+function resolveLoaderPath() {
+  try {
+    // Use the loader shipped by your package, if you publish it
+    return require.resolve('js-sanitizer/sanitizer.esm.loader.mjs', { paths: [ROOT] });
+  } catch {
+    // Fallback: write a loader into the consumer repo
+    return ensureLocalLoaderFile();
+  }
+}
+
 
   function hasStringInArray(inner, value) {
     const rx = new RegExp(`['"\`]${escapeForRx(value)}['"\`]`);
