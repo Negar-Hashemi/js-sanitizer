@@ -202,139 +202,182 @@ log(`Using project root: ${ROOT}`);
     return;
   }
 
-  // 2) Code-based config present → edit conservatively (string ops, avoid touching "exclude")
-  if (exists(targetPath)) {
-    let src = read(targetPath);
-    let changed = false;
+  // 2) Code-based config present → edit conservatively
+if (exists(targetPath)) {
+  let src = read(targetPath);
+  let changed = false;
 
-    (function injectIntoCommonjsEnv() {
-      let localChanged = false;
-
-      function appendIntoPluginsBlock(source, blockLabelRegex) {
-        return source.replace(blockLabelRegex, (whole, head, body) => {
-          const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
-          if (pluginsRx.test(body)) {
-            body = body.replace(pluginsRx, (m, inner) => {
-              if (inner.includes(`'${PLUGIN_NAME}'`) || inner.includes(`"${PLUGIN_NAME}"`)) return m;
-              const trimmed = inner.trim();
-              const hasTrailingComma = /,\s*$/.test(inner);
-              const innerNoTrailWS = inner.replace(/\s*$/, '');
-              const sep = trimmed ? (hasTrailingComma ? ' ' : ', ') : '';
-              localChanged = true;
-              return `plugins: [${innerNoTrailWS}${sep}'${PLUGIN_NAME}']`;
-            });
-          } else {
-            localChanged = true;
-            body = body.replace(/^\s*/, match => `${match}plugins: ['${PLUGIN_NAME}'],\n`);
-          }
-          return `${head}${body}}`;
-        });
-      }
-
-      const envCommonjs = /(\bcommonjs\s*:\s*\{\s*)([\s\S]*?)\}/m;
-      if (envCommonjs.test(src)) {
-        src = appendIntoPluginsBlock(src, envCommonjs);
-      }
-
-      if (localChanged) changed = true;
-    })();
-
-    // 2a) Ensure top-level plugins contains our plugin (fallback)
-    if (!src.includes(PLUGIN_NAME)) {
-      const pluginsArrayRegex = /plugins\s*:\s*\[([\s\S]*?)\]/m;
-      if (pluginsArrayRegex.test(src)) {
-        src = src.replace(pluginsArrayRegex, (m, inner) => {
-          if (inner.includes(`'${PLUGIN_NAME}'`) || inner.includes(`"${PLUGIN_NAME}"`)) return m;
-          const trimmed = inner.trim();
-          const hasTrailingComma = /,\s*$/.test(inner);
-          const innerNoTrailWS = inner.replace(/\s*$/, '');
-          const sep = trimmed ? (hasTrailingComma ? ' ' : ', ') : '';
-          return `plugins: [${innerNoTrailWS}${sep}'${PLUGIN_NAME}']`;
-        });
-        changed = true;
-      } else {
-        let inserted = false;
-        src = src.replace(/return\s*\{\s*/m, (mm) => {
-          inserted = true;
-          return `${mm}\n  plugins: ['${PLUGIN_NAME}'],`;
-        });
-        if (!inserted) {
-          src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
-            return `${mm}\n  plugins: ['${PLUGIN_NAME}'],`;
-          });
-        }
-        changed = true;
-      }
-    }
-
-    // 2b) Ensure @babel/preset-env exists (do not alter its "exclude")
-    if (!/['"]@babel\/preset-env['"]/.test(src)) {
-      const presetsRegex = /presets\s*:\s*\[/m;
-      if (presetsRegex.test(src)) {
-        src = src.replace(
-          presetsRegex,
-          `presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }], `
-        );
-      } else {
-        let inserted = false;
-        src = src.replace(/return\s*\{\s*/m, (mm) => {
-          inserted = true;
-          return `${mm}
-  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
-        });
-        if (!inserted) {
-          src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
-            return `${mm}
-  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
-          });
-        }
-      }
-      changed = true;
-    }
-
-    // 2c) If TypeScript is present, ensure @babel/preset-typescript exists (as a preset, not in exclude)
-    if (typescriptPresent && !/['"]@babel\/preset-typescript['"]/.test(src)) {
-      const presetsArrayRegex = /presets\s*:\s*\[([\s\S]*?)\]/m;
-      if (presetsArrayRegex.test(src)) {
-        src = src.replace(presetsArrayRegex, (m, inner) => {
-          if (inner.includes(`'@babel/preset-typescript'`) || inner.includes(`"@babel/preset-typescript"`)) return m;
-          const trimmed = inner.trim();
-          const hasTrailingComma = /,\s*$/.test(inner);
-          const innerNoTrailWS = inner.replace(/\s*$/, '');
-          const sep = trimmed ? (hasTrailingComma ? ' ' : ', ') : '';
-          return `presets: [${innerNoTrailWS}${sep}["@babel/preset-typescript", { allowDeclareFields: true }]]`;
-        });
-      } else {
-        let inserted = false;
-        src = src.replace(/return\s*\{\s*/m, (mm) => {
-          inserted = true;
-          return `${mm}
-  presets: [
-    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
-    ["@babel/preset-typescript", { allowDeclareFields: true }]
-  ],`;
-        });
-        if (!inserted) {
-          src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
-            return `${mm}
-  presets: [
-    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
-    ["@babel/preset-typescript", { allowDeclareFields: true }]
-  ],`;
-          });
-        }
-      }
-      changed = true;
-    }
-
-    if (changed) {
-      writeIfChanged(targetPath, src);
-      log(`Updated ${path.basename(targetPath)}: ensured presets/plugins (TS as preset; preset-env exclude untouched).`);
-    } else {
-      log(`${path.basename(targetPath)} already contains required presets/plugins.`);
-    }
-    return;
+  // --- helpers for code-based configs ---
+  // remove sanitizer when it was mistakenly appended as the 3rd element of a plugin tuple
+  function stripSanitizerFromPluginTuples(s) {
+    // specific: ['babel-plugin-transform-rename-properties', { ... }, 'module:js-sanitizer']
+    s = s.replace(
+      /(\[\s*['"]babel-plugin-transform-rename-properties['"]\s*,\s*\{[\s\S]*?\})\s*,\s*['"]module:js-sanitizer['"](\s*\])/g,
+      '$1$2'
+    );
+    // generic safety: any plugin tuple that ends with ,'module:js-sanitizer']
+    s = s.replace(
+      /(\[\s*['"][^'"]+['"][^\]]*?)\s*,\s*['"]module:js-sanitizer['"](\s*\])/g,
+      '$1$2'
+    );
+    return s;
   }
+
+  // tokenize the top-level items of an array literal string
+  function splitTopLevelArray(inner) {
+    const parts = [];
+    let cur = '';
+    let depthSq = 0, depthCurly = 0, depthPar = 0;
+    let str = null; // '\'' or '"'
+    for (let i = 0; i < inner.length; i++) {
+      const ch = inner[i];
+      if (str) {
+        cur += ch;
+        if (ch === str && inner[i - 1] !== '\\') str = null;
+        continue;
+      }
+      if (ch === '"' || ch === '\'') { str = ch; cur += ch; continue; }
+      if (ch === '[') { depthSq++; cur += ch; continue; }
+      if (ch === ']') { depthSq--; cur += ch; continue; }
+      if (ch === '{') { depthCurly++; cur += ch; continue; }
+      if (ch === '}') { depthCurly--; cur += ch; continue; }
+      if (ch === '(') { depthPar++; cur += ch; continue; }
+      if (ch === ')') { depthPar--; cur += ch; continue; }
+      if (ch === ',' && depthSq === 0 && depthCurly === 0 && depthPar === 0) {
+        parts.push(cur.trim());
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    if (cur.trim()) parts.push(cur.trim());
+    return parts;
+  }
+
+  function ensureTopLevelSanitizerInPlugins(source) {
+    const rx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
+    const m = rx.exec(source);
+    if (!m) return source; // no plugins array found
+    const inner = m[1];
+    const items = splitTopLevelArray(inner);
+    const hasTop = items.some(x => x === `'${PLUGIN_NAME}'` || x === `"${PLUGIN_NAME}"`);
+    if (hasTop) return source;
+
+    const sep = inner.trim() ? ', ' : '';
+    const replaced = source.replace(rx, (_whole, body) => {
+      return `plugins: [${body.replace(/\s*$/, '')}${sep}'${PLUGIN_NAME}']`;
+    });
+    return replaced;
+  }
+
+  // 1) clean up previous bad insertion (tuple)
+  const cleaned = stripSanitizerFromPluginTuples(src);
+  if (cleaned !== src) { src = cleaned; changed = true; }
+
+  // --- Inject ONLY into env.commonjs.plugins if present (Jest path) ---
+  (function injectIntoCommonjsEnv() {
+    let localChanged = false;
+
+    function appendIntoPluginsBlock(source, blockLabelRegex) {
+      return source.replace(blockLabelRegex, (whole, head, body) => {
+        const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
+        if (pluginsRx.test(body)) {
+          body = body.replace(pluginsRx, (m, inner) => {
+            // use the robust top-level check
+            const items = splitTopLevelArray(inner);
+            const hasTop = items.some(x => x === `'${PLUGIN_NAME}'` || x === `"${PLUGIN_NAME}"`);
+            if (hasTop) return m; // already present as top-level
+            const sep = inner.trim() ? ', ' : '';
+            localChanged = true;
+            return `plugins: [${inner.replace(/\s*$/, '')}${sep}'${PLUGIN_NAME}']`;
+          });
+        } else {
+          localChanged = true;
+          body = body.replace(/^\s*/, match => `${match}plugins: ['${PLUGIN_NAME}'],\n`);
+        }
+        return `${head}${body}}`;
+      });
+    }
+
+    const envCommonjs = /(\bcommonjs\s*:\s*\{\s*)([\s\S]*?)\}/m;
+    if (envCommonjs.test(src)) {
+      src = appendIntoPluginsBlock(src, envCommonjs);
+    }
+    if (localChanged) changed = true;
+  })();
+
+  // 2a) Ensure top-level plugins contains our plugin (robust; not a naive .includes)
+  const before = src;
+  src = ensureTopLevelSanitizerInPlugins(src);
+  if (src !== before) changed = true;
+
+  // 2b) Ensure @babel/preset-env exists (unchanged from your version)
+  if (!/['"]@babel\/preset-env['"]/.test(src)) {
+    const presetsRegex = /presets\s*:\s*\[/m;
+    if (presetsRegex.test(src)) {
+      src = src.replace(
+        presetsRegex,
+        `presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }], `
+      );
+    } else {
+      let inserted = false;
+      src = src.replace(/return\s*\{\s*/m, (mm) => {
+        inserted = true;
+        return `${mm}
+  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
+      });
+      if (!inserted) {
+        src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
+          return `${mm}
+  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
+        });
+      }
+    }
+    changed = true;
+  }
+
+  // 2c) If TypeScript is present, ensure @babel/preset-typescript exists (unchanged)
+  const typescriptPresent = hasAnyDep('typescript');
+  if (typescriptPresent && !/['"]@babel\/preset-typescript['"]/.test(src)) {
+    const presetsArrayRegex = /presets\s*:\s*\[([\s\S]*?)\]/m;
+    if (presetsArrayRegex.test(src)) {
+      src = src.replace(presetsArrayRegex, (m, inner) => {
+        if (inner.includes(`'@babel/preset-typescript'`) || inner.includes(`"@babel/preset-typescript"`)) return m;
+        const sep = inner.trim() ? ', ' : '';
+        return `presets: [${inner.replace(/\s*$/, '')}${sep}["@babel/preset-typescript", { allowDeclareFields: true }]]`;
+      });
+    } else {
+      let inserted = false;
+      src = src.replace(/return\s*\{\s*/m, (mm) => {
+        inserted = true;
+        return `${mm}
+  presets: [
+    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
+    ["@babel/preset-typescript", { allowDeclareFields: true }]
+  ],`;
+      });
+      if (!inserted) {
+        src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
+          return `${mm}
+  presets: [
+    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
+    ["@babel/preset-typescript", { allowDeclareFields: true }]
+  ],`;
+        });
+      }
+    }
+    changed = true;
+  }
+
+  if (changed) {
+    writeIfChanged(targetPath, src);
+    log(`Updated ${path.basename(targetPath)}: fixed tuple placement and ensured top-level ${PLUGIN_NAME}.`);
+  } else {
+    log(`${path.basename(targetPath)} already OK.`);
+  }
+  return;
+}
+
 
   // 3) No config found → minimal one
   const typescriptPresentMinimal = hasAnyDep('typescript');
