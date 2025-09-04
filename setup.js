@@ -638,36 +638,60 @@ async function loadPresets() {
   return presets;
 }
 
+// Heuristic: detect JSX in .js/.mjs by pragma or obvious tags
+const JSX_HINT = /\\/\\*\\*?\\s*@jsx\\b|<[A-Za-z][\\w-]*(\\s|>|\\/)?>/;
+
 export async function resolve(specifier, context, nextResolve) {
   return nextResolve(specifier, context);
 }
 
 export async function load(url, context, nextLoad) {
   if (!url.startsWith('file:')) return nextLoad(url, context);
+
+  // Ignore declaration files
   if (url.endsWith('.d.ts')) {
     return { format: 'module', source: 'export {}; /* js-sanitizer: ignored .d.ts */', shortCircuit: true };
   }
-  if (url.endsWith('.ts') || url.endsWith('.tsx')) {
-    const filename = fileURLToPath(url);
-    const source = await fs.readFile(filename, 'utf8');
-    await ensureBabel();
-    const presets = await loadPresets();
-    const hasTsPreset = presets.length >= 2;
-    if (!hasTsPreset) {
-      throw new Error('[js-sanitizer] @babel/preset-typescript is required to execute TypeScript. Set JS_SANITIZER_AUTO_INSTALL=1 or add it.');
-    }
-    const { code } = await transformAsync(source, {
-      filename,
-      presets,
-      sourceMaps: 'inline',
-      babelrc: true,
-      rootMode: 'upward-optional'
-    });
-    return { format: 'module', source: code, shortCircuit: true };
+
+  const filename = fileURLToPath(url);
+  const lower = filename.toLowerCase();
+
+  // We may need to transpile: TS/TSX always; JSX always; JS/MJS only if it looks like JSX (or forced)
+  const isTS = lower.endsWith('.ts') || lower.endsWith('.tsx');
+  const isJSXExt = lower.endsWith('.jsx');
+  const isJSLike = lower.endsWith('.js') || lower.endsWith('.mjs') || isJSXExt;
+
+  if (!isTS && !isJSLike) {
+    return nextLoad(url, context);
   }
-  return nextLoad(url, context);
+
+  const source = await fs.readFile(filename, 'utf8');
+
+  const shouldTranspile =
+    isTS ||
+    isJSXExt ||
+    process.env.JS_SANITIZER_EAGER_ESM === '1' ||
+    JSX_HINT.test(source);
+
+  if (!shouldTranspile) {
+    return nextLoad(url, context);
+  }
+
+  await ensureBabel();
+  const presets = await loadPresets();
+
+  const { code } = await transformAsync(source, {
+    filename,
+    presets,
+    sourceMaps: 'inline',
+    babelrc: true,
+    rootMode: 'upward-optional'
+  });
+
+  return { format: 'module', source: code, shortCircuit: true };
 }
 `;
+
   writeIfChanged(LOADER_PATH, loaderSrc);
   log('Ensured sanitizer.esm.loader.mjs');
 
