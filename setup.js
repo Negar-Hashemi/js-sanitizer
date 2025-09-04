@@ -135,14 +135,11 @@ log(`Using project root: ${ROOT}`);
   // Helpers for JSON-based configs (tuple-safe)
   const addPluginToJSONCfg = (cfg) => {
     const arr = Array.isArray(cfg.plugins) ? cfg.plugins.slice() : [];
-  
+
     let present = false;
     const fixed = arr.map((entry) => {
       if (Array.isArray(entry)) {
-        // If tuple *is* the sanitizer, it's present.
         if (entry[0] === PLUGIN_NAME) present = true;
-  
-        // If sanitizer accidentally got appended inside another tuple, strip it out.
         const idx = entry.findIndex(v => v === PLUGIN_NAME);
         if (idx > 0) {
           const copy = entry.slice();
@@ -151,17 +148,14 @@ log(`Using project root: ${ROOT}`);
         }
         return entry;
       }
-  
       if (entry === PLUGIN_NAME) present = true;
       return entry;
     });
-  
+
     if (!present) fixed.push(PLUGIN_NAME);
     cfg.plugins = fixed;
     return cfg;
   };
-  
-
 
   const ensurePresetInJSONCfg = (cfg, presetName, presetConfig) => {
     cfg.presets = Array.isArray(cfg.presets) ? cfg.presets.slice() : [];
@@ -212,262 +206,269 @@ log(`Using project root: ${ROOT}`);
   }
 
   // 2) Code-based config present → edit conservatively
-if (exists(targetPath)) {
-  let src = read(targetPath);
-  let changed = false;
+  if (exists(targetPath)) {
+    let src = read(targetPath);
+    let changed = false;
 
-  // Remove any accidental preset tuples from preset-env "exclude"
-function fixPresetEnvExclude(code) {
-  // Targets first @babel/preset-env options block that has exclude: [...]
-  return code.replace(
-    /(presets\s*:\s*\[[\s\S]*?['"]@babel\/preset-env['"][\s\S]*?\{\s*[^}]*?\bexclude\s*:\s*\[)([\s\S]*?)(\])/m,
-    (m, head, content, tail) => {
-      // Remove entries that look like preset tuples: ["@babel/preset-xxx", {...}]
-      let cleaned = content.replace(
-        /(^|,)\s*\[\s*['"]@babel\/preset-[^'"]+['"][\s\S]*?\](?=,|$)/g,
-        (mm, lead) => (lead || '')
-      );
-      cleaned = cleaned.replace(/,\s*,/g, ',').replace(/^\s*,|,\s*$/g, '');
-      return head + cleaned + tail;
-    }
-  );
-}
-
-// Strip sanitizer if it ended up *inside* any plugin tuple
-function stripSanitizerInsideTuples(inner) {
-  // Only touch nested [ ... ] blocks inside the plugins array
-  return inner.replace(/\[([^\]]*?)\]/g, (m, tupleInner) => {
-    let t = tupleInner.replace(
-      /(^|,)\s*(['"])module:js-sanitizer\2\s*(?=,|$)/g,
-      (mm, lead) => (lead || '')
-    );
-    t = t.replace(/,\s*,/g, ',').replace(/^\s*,|,\s*$/g, '');
-    return '[' + t + ']';
-  });
-}
-
-// Safely append sanitizer to every `plugins: [ ... ]` block (depth-aware)
-function addSanitizerToPluginsBlocks(code, pluginName) {
-  let i = 0;
-  while (true) {
-    const keyIdx = code.indexOf('plugins', i);
-    if (keyIdx === -1) break;
-
-    const colonIdx = code.indexOf(':', keyIdx);
-    const openIdx  = code.indexOf('[', keyIdx);
-    if (colonIdx === -1 || openIdx === -1 || colonIdx > openIdx) {
-      i = keyIdx + 7; // move past 'plugins'
-      continue;
-    }
-
-    // Walk to matching closing bracket using depth counting
-    let j = openIdx + 1, depth = 1;
-    while (j < code.length && depth > 0) {
-      const ch = code[j];
-      if (ch === '[') depth++;
-      else if (ch === ']') depth--;
-      j++;
-    }
-    if (depth !== 0) break; // unbalanced; give up
-
-    const inner = code.slice(openIdx + 1, j - 1);
-
-    // 1) clean any accidental tuple insertion
-    const cleanedInner = stripSanitizerInsideTuples(inner);
-
-    // 2) if sanitizer not already present at top-level, append it
-    const hasTopLevel = /(^|,)\s*(['"])module:js-sanitizer\2\s*(?=,|$)/.test(
-      cleanedInner.replace(/\[[^\]]*\]/g, '') // ignore tuples when checking top-level
-    );
-
-    let nextInner = cleanedInner;
-    if (!hasTopLevel) {
-      const needsComma = cleanedInner.trim().length > 0 && !/,\s*$/.test(cleanedInner.trim());
-      nextInner = cleanedInner.replace(/\s*$/, '') + (needsComma ? ', ' : '') + `'${pluginName}'`;
-    }
-
-    // Splice back
-    code = code.slice(0, openIdx + 1) + nextInner + code.slice(j - 1);
-    i = openIdx + 1 + nextInner.length; // continue after this array
-  }
-  return code;
-}
-
-
-  // --- helpers for code-based configs ---
-  // remove sanitizer when it was mistakenly appended as the 3rd element of a plugin tuple
-  function stripSanitizerFromPluginTuples(s) {
-    // specific: ['babel-plugin-transform-rename-properties', { ... }, 'module:js-sanitizer']
-    s = s.replace(
-      /(\[\s*['"]babel-plugin-transform-rename-properties['"]\s*,\s*\{[\s\S]*?\})\s*,\s*['"]module:js-sanitizer['"](\s*\])/g,
-      '$1$2'
-    );
-    // generic safety: any plugin tuple that ends with ,'module:js-sanitizer']
-    s = s.replace(
-      /(\[\s*['"][^'"]+['"][^\]]*?)\s*,\s*['"]module:js-sanitizer['"](\s*\])/g,
-      '$1$2'
-    );
-    return s;
-  }
-
-  // tokenize the top-level items of an array literal string
-  function splitTopLevelArray(inner) {
-    const parts = [];
-    let cur = '';
-    let depthSq = 0, depthCurly = 0, depthPar = 0;
-    let str = null; // '\'' or '"'
-    for (let i = 0; i < inner.length; i++) {
-      const ch = inner[i];
-      if (str) {
-        cur += ch;
-        if (ch === str && inner[i - 1] !== '\\') str = null;
-        continue;
-      }
-      if (ch === '"' || ch === '\'') { str = ch; cur += ch; continue; }
-      if (ch === '[') { depthSq++; cur += ch; continue; }
-      if (ch === ']') { depthSq--; cur += ch; continue; }
-      if (ch === '{') { depthCurly++; cur += ch; continue; }
-      if (ch === '}') { depthCurly--; cur += ch; continue; }
-      if (ch === '(') { depthPar++; cur += ch; continue; }
-      if (ch === ')') { depthPar--; cur += ch; continue; }
-      if (ch === ',' && depthSq === 0 && depthCurly === 0 && depthPar === 0) {
-        parts.push(cur.trim());
-        cur = '';
-      } else {
-        cur += ch;
-      }
-    }
-    if (cur.trim()) parts.push(cur.trim());
-    return parts;
-  }
-
-  function ensureTopLevelSanitizerInPlugins(source) {
-    const rx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
-    const m = rx.exec(source);
-    if (!m) return source; // no plugins array found
-    const inner = m[1];
-    const items = splitTopLevelArray(inner);
-    const hasTop = items.some(x => x === `'${PLUGIN_NAME}'` || x === `"${PLUGIN_NAME}"`);
-    if (hasTop) return source;
-
-    const sep = inner.trim() ? ', ' : '';
-    const replaced = source.replace(rx, (_whole, body) => {
-      return `plugins: [${body.replace(/\s*$/, '')}${sep}'${PLUGIN_NAME}']`;
-    });
-    return replaced;
-  }
-
-  // 1) clean up previous bad insertion (tuple)
-  const cleaned = stripSanitizerFromPluginTuples(src);
-  if (cleaned !== src) { src = cleaned; changed = true; }
-
-  // --- Inject ONLY into env.commonjs.plugins if present (Jest path) ---
-  (function injectIntoCommonjsEnv() {
-    let localChanged = false;
-
-    function appendIntoPluginsBlock(source, blockLabelRegex) {
-      return source.replace(blockLabelRegex, (whole, head, body) => {
-        const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
-        if (pluginsRx.test(body)) {
-          body = body.replace(pluginsRx, (m, inner) => {
-            // use the robust top-level check
-            const items = splitTopLevelArray(inner);
-            const hasTop = items.some(x => x === `'${PLUGIN_NAME}'` || x === `"${PLUGIN_NAME}"`);
-            if (hasTop) return m; // already present as top-level
-            const sep = inner.trim() ? ', ' : '';
-            localChanged = true;
-            return `plugins: [${inner.replace(/\s*$/, '')}${sep}'${PLUGIN_NAME}']`;
-          });
-        } else {
-          localChanged = true;
-          body = body.replace(/^\s*/, match => `${match}plugins: ['${PLUGIN_NAME}'],\n`);
+    // Remove any accidental preset tuples from preset-env "exclude"
+    function fixPresetEnvExclude(code) {
+      return code.replace(
+        /(presets\s*:\s*\[[\s\S]*?['"]@babel\/preset-env['"][\s\S]*?\{\s*[^}]*?\bexclude\s*:\s*\[)([\s\S]*?)(\])/m,
+        (m, head, content, tail) => {
+          let cleaned = content.replace(
+            /(^|,)\s*\[\s*['"]@babel\/preset-[^'"]+['"][\s\S]*?\](?=,|$)/g,
+            (mm, lead) => (lead || '')
+          );
+          cleaned = cleaned.replace(/,\s*,/g, ',').replace(/^\s*,|,\s*$/g, '');
+          return head + cleaned + tail;
         }
-        return `${head}${body}}`;
-      });
-    }
-
-    const envCommonjs = /(\bcommonjs\s*:\s*\{\s*)([\s\S]*?)\}/m;
-    if (envCommonjs.test(src)) {
-      src = appendIntoPluginsBlock(src, envCommonjs);
-    }
-    if (localChanged) changed = true;
-  })();
-
-  // 2a) Ensure top-level plugins contains our plugin (robust; not a naive .includes)
-  const before = src;
-  src = ensureTopLevelSanitizerInPlugins(src);
-  if (src !== before) changed = true;
-
-  src = fixPresetEnvExclude(src);
-  src = addSanitizerToPluginsBlocks(src, PLUGIN_NAME);
-
-  // 2b) Ensure @babel/preset-env exists (unchanged from your version)
-  if (!/['"]@babel\/preset-env['"]/.test(src)) {
-    const presetsRegex = /presets\s*:\s*\[/m;
-    if (presetsRegex.test(src)) {
-      src = src.replace(
-        presetsRegex,
-        `presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }], `
       );
-    } else {
-      let inserted = false;
-      src = src.replace(/return\s*\{\s*/m, (mm) => {
-        inserted = true;
-        return `${mm}
-  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
+    }
+
+    // Strip sanitizer if it ended up *inside* any plugin tuple
+    function stripSanitizerInsideTuples(inner) {
+      return inner.replace(/\[([^\]]*?)\]/g, (m, tupleInner) => {
+        let t = tupleInner.replace(
+          /(^|,)\s*(['"])module:js-sanitizer\2\s*(?=,|$)/g,
+          (mm, lead) => (lead || '')
+        );
+        t = t.replace(/,\s*,/g, ',').replace(/^\s*,|,\s*$/g, '');
+        return '[' + t + ']';
       });
-      if (!inserted) {
-        src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
+    }
+
+    // Safely append sanitizer to every `plugins: [ ... ]` block (depth-aware)
+    function addSanitizerToPluginsBlocks(code, pluginName) {
+      let i = 0;
+      while (true) {
+        const keyIdx = code.indexOf('plugins', i);
+        if (keyIdx === -1) break;
+
+        const colonIdx = code.indexOf(':', keyIdx);
+        const openIdx  = code.indexOf('[', keyIdx);
+        if (colonIdx === -1 || openIdx === -1 || colonIdx > openIdx) {
+          i = keyIdx + 7;
+          continue;
+        }
+
+        let j = openIdx + 1, depth = 1;
+        while (j < code.length && depth > 0) {
+          const ch = code[j];
+          if (ch === '[') depth++;
+          else if (ch === ']') depth--;
+          j++;
+        }
+        if (depth !== 0) break;
+
+        const inner = code.slice(openIdx + 1, j - 1);
+        const cleanedInner = stripSanitizerInsideTuples(inner);
+
+        const hasTopLevel = /(^|,)\s*(['"])module:js-sanitizer\2\s*(?=,|$)/.test(
+          cleanedInner.replace(/\[[^\]]*\]/g, '')
+        );
+
+        let nextInner = cleanedInner;
+        if (!hasTopLevel) {
+          const needsComma = cleanedInner.trim().length > 0 && !/,\s*$/.test(cleanedInner.trim());
+          nextInner = cleanedInner.replace(/\s*$/, '') + (needsComma ? ', ' : '') + `'${PLUGIN_NAME}'`;
+        }
+
+        code = code.slice(0, openIdx + 1) + nextInner + code.slice(j - 1);
+        i = openIdx + 1 + nextInner.length;
+      }
+      return code;
+    }
+
+    // --- helpers for code-based configs ---
+    function stripSanitizerFromPluginTuples(s) {
+      s = s.replace(
+        /(\[\s*['"]babel-plugin-transform-rename-properties['"]\s*,\s*\{[\s\S]*?\})\s*,\s*['"]module:js-sanitizer['"](\s*\])/g,
+        '$1$2'
+      );
+      s = s.replace(
+        /(\[\s*['"][^'"]+['"][^\]]*?)\s*,\s*['"]module:js-sanitizer['"](\s*\])/g,
+        '$1$2'
+      );
+      return s;
+    }
+
+    function splitTopLevelArray(inner) {
+      const parts = [];
+      let cur = '';
+      let depthSq = 0, depthCurly = 0, depthPar = 0;
+      let str = null;
+      for (let i = 0; i < inner.length; i++) {
+        const ch = inner[i];
+        if (str) {
+          cur += ch;
+          if (ch === str && inner[i - 1] !== '\\') str = null;
+          continue;
+        }
+        if (ch === '"' || ch === '\'') { str = ch; cur += ch; continue; }
+        if (ch === '[') { depthSq++; cur += ch; continue; }
+        if (ch === ']') { depthSq--; cur += ch; continue; }
+        if (ch === '{') { depthCurly++; cur += ch; continue; }
+        if (ch === '}') { depthCurly--; cur += ch; continue; }
+        if (ch === '(') { depthPar++; cur += ch; continue; }
+        if (ch === ')') { depthPar--; cur += ch; continue; }
+        if (ch === ',' && depthSq === 0 && depthCurly === 0 && depthPar === 0) {
+          parts.push(cur.trim());
+          cur = '';
+        } else {
+          cur += ch;
+        }
+      }
+      if (cur.trim()) parts.push(cur.trim());
+      return parts;
+    }
+
+    function ensureTopLevelSanitizerInPlugins(source) {
+      const rx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
+      const m = rx.exec(source);
+      if (!m) return source;
+      const inner = m[1];
+      const items = splitTopLevelArray(inner);
+      const hasTop = items.some(x => x === `'${PLUGIN_NAME}'` || x === `"${PLUGIN_NAME}"`);
+      if (hasTop) return source;
+
+      const sep = inner.trim() ? ', ' : '';
+      const replaced = source.replace(rx, (_whole, body) => {
+        return `plugins: [${body.replace(/\s*$/, '')}${sep}'${PLUGIN_NAME}']`;
+      });
+      return replaced;
+    }
+
+    // Depth-aware finder for end of array literal (skips strings/templ.)
+    function findArrayEnd(code, openIdx) {
+      let i = openIdx, depth = 0, esc = false, s=false, d=false, t=false;
+      for (; i < code.length; i++) {
+        const ch = code[i];
+        if (esc) { esc = false; continue; }
+        if (ch === '\\') { esc = true; continue; }
+        if (s) { if (ch === "'") s = false; continue; }
+        if (d) { if (ch === '"') d = false; continue; }
+        if (t) { if (ch === '`') t = false; continue; }
+        if (ch === "'") { s = true; continue; }
+        if (ch === '"') { d = true; continue; }
+        if (ch === '`') { t = true; continue; }
+        if (ch === '[') { depth++; continue; }
+        if (ch === ']') { depth--; if (depth === 0) return i; }
+      }
+      return -1;
+    }
+
+    // Append TS preset to the *top-level* presets array (not inside exclude)
+    function addTypescriptPresetSafely(code) {
+      let pos = 0;
+      while (true) {
+        const key = code.indexOf('presets', pos);
+        if (key === -1) break;
+        const colon = code.indexOf(':', key);
+        const open  = code.indexOf('[', colon);
+        if (colon === -1 || open === -1) { pos = key + 7; continue; }
+
+        const end = findArrayEnd(code, open);
+        if (end === -1) { pos = key + 7; continue; }
+
+        const inner = code.slice(open + 1, end);
+        if (/@babel\/preset-typescript/.test(inner)) { pos = end + 1; continue; }
+
+        const trimmed = inner.trim();
+        const needsComma = trimmed.length > 0 && !/,\s*$/.test(trimmed);
+        const insertion = (needsComma ? ', ' : '') + '["@babel/preset-typescript", { allowDeclareFields: true }]';
+
+        code = code.slice(0, end) + insertion + code.slice(end);
+        return code; // insert once
+      }
+      return code;
+    }
+
+    // 1) clean up previous bad insertion (tuple)
+    const cleaned = stripSanitizerFromPluginTuples(src);
+    if (cleaned !== src) { src = cleaned; changed = true; }
+
+    // Inject ONLY into env.commonjs.plugins if present (Jest path)
+    (function injectIntoCommonjsEnv() {
+      let localChanged = false;
+
+      function appendIntoPluginsBlock(source, blockLabelRegex) {
+        return source.replace(blockLabelRegex, (whole, head, body) => {
+          const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
+          if (pluginsRx.test(body)) {
+            body = body.replace(pluginsRx, (m, inner) => {
+              const items = splitTopLevelArray(inner);
+              const hasTop = items.some(x => x === `'${PLUGIN_NAME}'` || x === `"${PLUGIN_NAME}"`);
+              if (hasTop) return m;
+              const sep = inner.trim() ? ', ' : '';
+              localChanged = true;
+              return `plugins: [${inner.replace(/\s*$/, '')}${sep}'${PLUGIN_NAME}']`;
+            });
+          } else {
+            localChanged = true;
+            body = body.replace(/^\s*/, match => `${match}plugins: ['${PLUGIN_NAME}'],\n`);
+          }
+          return `${head}${body}}`;
+        });
+      }
+
+      const envCommonjs = /(\bcommonjs\s*:\s*\{\s*)([\s\S]*?)\}/m;
+      if (envCommonjs.test(src)) {
+        src = appendIntoPluginsBlock(src, envCommonjs);
+      }
+      if (localChanged) changed = true;
+    })();
+
+    // Ensure top-level plugins contains our plugin
+    const before = src;
+    src = ensureTopLevelSanitizerInPlugins(src);
+    if (src !== before) changed = true;
+
+    // Fix any prior bad insert into exclude & re-add sanitizer safely
+    const beforeFix = src;
+    src = fixPresetEnvExclude(src);
+    if (src !== beforeFix) changed = true;
+    src = addSanitizerToPluginsBlocks(src, PLUGIN_NAME);
+
+    // Ensure @babel/preset-env exists (unchanged)
+    if (!/['"]@babel\/preset-env['"]/.test(src)) {
+      const presetsRegex = /presets\s*:\s*\[/m;
+      if (presetsRegex.test(src)) {
+        src = src.replace(
+          presetsRegex,
+          `presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }], `
+        );
+      } else {
+        let inserted = false;
+        src = src.replace(/return\s*\{\s*/m, (mm) => {
+          inserted = true;
           return `${mm}
   presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
         });
+        if (!inserted) {
+          src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
+            return `${mm}
+  presets: [["@babel/preset-env", { targets: { node: "current" }, modules: false }]],`;
+          });
+        }
       }
+      changed = true;
     }
-    changed = true;
-  }
 
-  // 2c) If TypeScript is present, ensure @babel/preset-typescript exists (unchanged)
-  const typescriptPresent = hasAnyDep('typescript');
-  if (typescriptPresent && !/['"]@babel\/preset-typescript['"]/.test(src)) {
-    const presetsArrayRegex = /presets\s*:\s*\[([\s\S]*?)\]/m;
-    if (presetsArrayRegex.test(src)) {
-      src = src.replace(presetsArrayRegex, (m, inner) => {
-        if (inner.includes(`'@babel/preset-typescript'`) || inner.includes(`"@babel/preset-typescript"`)) return m;
-        const sep = inner.trim() ? ', ' : '';
-        return `presets: [${inner.replace(/\s*$/, '')}${sep}["@babel/preset-typescript", { allowDeclareFields: true }]]`;
-      });
+    // Depth-aware: If TypeScript present, append TS preset to *top-level* presets
+    if (hasAnyDep('typescript')) {
+      const beforeTs = src;
+      src = addTypescriptPresetSafely(src);
+      if (src !== beforeTs) changed = true;
+    }
+
+    if (changed) {
+      writeIfChanged(targetPath, src);
+      log(`Updated ${path.basename(targetPath)}: fixed tuple placement and ensured top-level ${PLUGIN_NAME}.`);
     } else {
-      let inserted = false;
-      src = src.replace(/return\s*\{\s*/m, (mm) => {
-        inserted = true;
-        return `${mm}
-  presets: [
-    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
-    ["@babel/preset-typescript", { allowDeclareFields: true }]
-  ],`;
-      });
-      if (!inserted) {
-        src = src.replace(/module\.exports\s*=\s*\{\s*/m, (mm) => {
-          return `${mm}
-  presets: [
-    ["@babel/preset-env", { targets: { node: "current" }, modules: false }],
-    ["@babel/preset-typescript", { allowDeclareFields: true }]
-  ],`;
-        });
-      }
+      log(`${path.basename(targetPath)} already OK.`);
     }
-    changed = true;
+    return;
   }
-
-  if (changed) {
-    writeIfChanged(targetPath, src);
-    log(`Updated ${path.basename(targetPath)}: fixed tuple placement and ensured top-level ${PLUGIN_NAME}.`);
-  } else {
-    log(`${path.basename(targetPath)} already OK.`);
-  }
-  return;
-}
-
 
   // 3) No config found → minimal one
   const typescriptPresentMinimal = hasAnyDep('typescript');
@@ -486,6 +487,7 @@ function addSanitizerToPluginsBlocks(code, pluginName) {
   fs.writeFileSync(targetPath, minimal);
   log(`Created ${path.basename(targetPath)} (minimal, includes ${PLUGIN_NAME}${typescriptPresentMinimal ? ' + preset-typescript' : ''}).`);
 })();
+
 
 
 /* ----------------------------------------
