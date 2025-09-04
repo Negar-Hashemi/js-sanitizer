@@ -134,11 +134,25 @@ log(`Using project root: ${ROOT}`);
 
   // Helpers for JSON-based configs
   const addPluginToJSONCfg = (cfg) => {
-    const arr = Array.isArray(cfg.plugins) ? cfg.plugins.slice() : [];
-    if (!arr.includes(PLUGIN_NAME)) arr.push(PLUGIN_NAME);
-    cfg.plugins = arr;
+    const list = Array.isArray(cfg.plugins) ? [...cfg.plugins] : [];
+  
+    // Check if sanitizer is already present (string entry OR as a tuple name/instanceName)
+    const present = list.some((entry) => {
+      if (typeof entry === 'string') return entry === PLUGIN_NAME;
+      if (Array.isArray(entry)) {
+        const [name, , instanceName] = entry;
+        return name === PLUGIN_NAME || instanceName === PLUGIN_NAME;
+      }
+      return false;
+    });
+  
+    // Add as its own top-level entry
+    if (!present) list.push(PLUGIN_NAME);
+  
+    cfg.plugins = list;
     return cfg;
   };
+
 
   const ensurePresetInJSONCfg = (cfg, presetName, presetConfig) => {
     cfg.presets = Array.isArray(cfg.presets) ? cfg.presets.slice() : [];
