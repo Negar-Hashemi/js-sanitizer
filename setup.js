@@ -132,26 +132,35 @@ log(`Using project root: ${ROOT}`);
     }
   }
 
-  // Helpers for JSON-based configs
+  // Helpers for JSON-based configs (tuple-safe)
   const addPluginToJSONCfg = (cfg) => {
-    const list = Array.isArray(cfg.plugins) ? [...cfg.plugins] : [];
+    const arr = Array.isArray(cfg.plugins) ? cfg.plugins.slice() : [];
   
-    // Check if sanitizer is already present (string entry OR as a tuple name/instanceName)
-    const present = list.some((entry) => {
-      if (typeof entry === 'string') return entry === PLUGIN_NAME;
+    let present = false;
+    const fixed = arr.map((entry) => {
       if (Array.isArray(entry)) {
-        const [name, , instanceName] = entry;
-        return name === PLUGIN_NAME || instanceName === PLUGIN_NAME;
+        // If tuple *is* the sanitizer, it's present.
+        if (entry[0] === PLUGIN_NAME) present = true;
+  
+        // If sanitizer accidentally got appended inside another tuple, strip it out.
+        const idx = entry.findIndex(v => v === PLUGIN_NAME);
+        if (idx > 0) {
+          const copy = entry.slice();
+          copy.splice(idx, 1);
+          return copy;
+        }
+        return entry;
       }
-      return false;
+  
+      if (entry === PLUGIN_NAME) present = true;
+      return entry;
     });
   
-    // Add as its own top-level entry
-    if (!present) list.push(PLUGIN_NAME);
-  
-    cfg.plugins = list;
+    if (!present) fixed.push(PLUGIN_NAME);
+    cfg.plugins = fixed;
     return cfg;
   };
+  
 
 
   const ensurePresetInJSONCfg = (cfg, presetName, presetConfig) => {
@@ -206,6 +215,84 @@ log(`Using project root: ${ROOT}`);
 if (exists(targetPath)) {
   let src = read(targetPath);
   let changed = false;
+
+  // Remove any accidental preset tuples from preset-env "exclude"
+function fixPresetEnvExclude(code) {
+  // Targets first @babel/preset-env options block that has exclude: [...]
+  return code.replace(
+    /(presets\s*:\s*\[[\s\S]*?['"]@babel\/preset-env['"][\s\S]*?\{\s*[^}]*?\bexclude\s*:\s*\[)([\s\S]*?)(\])/m,
+    (m, head, content, tail) => {
+      // Remove entries that look like preset tuples: ["@babel/preset-xxx", {...}]
+      let cleaned = content.replace(
+        /(^|,)\s*\[\s*['"]@babel\/preset-[^'"]+['"][\s\S]*?\](?=,|$)/g,
+        (mm, lead) => (lead || '')
+      );
+      cleaned = cleaned.replace(/,\s*,/g, ',').replace(/^\s*,|,\s*$/g, '');
+      return head + cleaned + tail;
+    }
+  );
+}
+
+// Strip sanitizer if it ended up *inside* any plugin tuple
+function stripSanitizerInsideTuples(inner) {
+  // Only touch nested [ ... ] blocks inside the plugins array
+  return inner.replace(/\[([^\]]*?)\]/g, (m, tupleInner) => {
+    let t = tupleInner.replace(
+      /(^|,)\s*(['"])module:js-sanitizer\2\s*(?=,|$)/g,
+      (mm, lead) => (lead || '')
+    );
+    t = t.replace(/,\s*,/g, ',').replace(/^\s*,|,\s*$/g, '');
+    return '[' + t + ']';
+  });
+}
+
+// Safely append sanitizer to every `plugins: [ ... ]` block (depth-aware)
+function addSanitizerToPluginsBlocks(code, pluginName) {
+  let i = 0;
+  while (true) {
+    const keyIdx = code.indexOf('plugins', i);
+    if (keyIdx === -1) break;
+
+    const colonIdx = code.indexOf(':', keyIdx);
+    const openIdx  = code.indexOf('[', keyIdx);
+    if (colonIdx === -1 || openIdx === -1 || colonIdx > openIdx) {
+      i = keyIdx + 7; // move past 'plugins'
+      continue;
+    }
+
+    // Walk to matching closing bracket using depth counting
+    let j = openIdx + 1, depth = 1;
+    while (j < code.length && depth > 0) {
+      const ch = code[j];
+      if (ch === '[') depth++;
+      else if (ch === ']') depth--;
+      j++;
+    }
+    if (depth !== 0) break; // unbalanced; give up
+
+    const inner = code.slice(openIdx + 1, j - 1);
+
+    // 1) clean any accidental tuple insertion
+    const cleanedInner = stripSanitizerInsideTuples(inner);
+
+    // 2) if sanitizer not already present at top-level, append it
+    const hasTopLevel = /(^|,)\s*(['"])module:js-sanitizer\2\s*(?=,|$)/.test(
+      cleanedInner.replace(/\[[^\]]*\]/g, '') // ignore tuples when checking top-level
+    );
+
+    let nextInner = cleanedInner;
+    if (!hasTopLevel) {
+      const needsComma = cleanedInner.trim().length > 0 && !/,\s*$/.test(cleanedInner.trim());
+      nextInner = cleanedInner.replace(/\s*$/, '') + (needsComma ? ', ' : '') + `'${pluginName}'`;
+    }
+
+    // Splice back
+    code = code.slice(0, openIdx + 1) + nextInner + code.slice(j - 1);
+    i = openIdx + 1 + nextInner.length; // continue after this array
+  }
+  return code;
+}
+
 
   // --- helpers for code-based configs ---
   // remove sanitizer when it was mistakenly appended as the 3rd element of a plugin tuple
@@ -310,6 +397,9 @@ if (exists(targetPath)) {
   const before = src;
   src = ensureTopLevelSanitizerInPlugins(src);
   if (src !== before) changed = true;
+
+  src = fixPresetEnvExclude(src);
+  src = addSanitizerToPluginsBlocks(src, PLUGIN_NAME);
 
   // 2b) Ensure @babel/preset-env exists (unchanged from your version)
   if (!/['"]@babel\/preset-env['"]/.test(src)) {
