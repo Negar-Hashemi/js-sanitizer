@@ -12,7 +12,6 @@ const path = require('path');
 const cp = require('child_process');
 
 const ROOT = (() => {
-  // Prefer workspace signals first (robust even when the dep is hoisted)
   const localPrefix = process.env.npm_config_local_prefix;
   if (localPrefix && fs.existsSync(path.join(localPrefix, 'package.json'))) {
     return localPrefix;
@@ -20,7 +19,6 @@ const ROOT = (() => {
   if (process.env.INIT_CWD && fs.existsSync(path.join(process.env.INIT_CWD, 'package.json'))) {
     return process.env.INIT_CWD;
   }
-  // Fallback: if installed under <consumer>/node_modules/js-sanitizer, twoUp is the consumer
   const twoUp = path.resolve(__dirname, '..', '..');
   if (fs.existsSync(path.join(twoUp, 'package.json')) && !/node_modules[\\/]/.test(twoUp)) {
     return twoUp;
@@ -42,7 +40,7 @@ const writeIfChanged = (p, s) => {
   return true;
 };
 
-// ---- safe package.json updater (prevents stale overwrite) ----
+// ---- safe package.json updater ----
 function updatePkg(mutator) {
   const before = readJSON(PKG_PATH) || {};
   const copy = JSON.parse(JSON.stringify(before));
@@ -107,7 +105,7 @@ if (process.env.JS_SANITIZER_SKIP_SETUP === '1') {
   process.exit(0);
 }
 
-// initial snapshot (used for non-destructive reads only)
+// snapshot
 const pkg = readJSON(PKG_PATH) || {};
 const isESMProject = pkg.type === 'module';
 const hasDep = (name) => !!(pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.peerDependencies?.[name]);
@@ -118,11 +116,10 @@ log(`Using project root: ${ROOT}`);
  * 1) Ensure Babel config + modules:false (+ TS when present)
  * --------------------------------------*/
 (function ensureBabelConfig() {
-  // Prefer .cjs in ESM projects when using CommonJS export to avoid "module is not defined"
   const targetBabelFile = isESMProject ? 'babel.config.cjs' : 'babel.config.js';
   const targetPath = path.join(ROOT, targetBabelFile);
 
-  // If ESM project has babel.config.js with CJS export, rename to .cjs
+  // Rename to .cjs for ESM projects if using CJS export
   const jsPath = path.join(ROOT, 'babel.config.js');
   if (isESMProject && exists(jsPath)) {
     const src = read(jsPath);
@@ -135,7 +132,7 @@ log(`Using project root: ${ROOT}`);
     }
   }
 
-  // Helper: add plugin name into a JSON-style babel config object safely
+  // Helpers for JSON-based configs
   const addPluginToJSONCfg = (cfg) => {
     const arr = Array.isArray(cfg.plugins) ? cfg.plugins.slice() : [];
     if (!arr.includes(PLUGIN_NAME)) arr.push(PLUGIN_NAME);
@@ -143,7 +140,6 @@ log(`Using project root: ${ROOT}`);
     return cfg;
   };
 
-  // Helper: ensure preset exists in JSON cfg
   const ensurePresetInJSONCfg = (cfg, presetName, presetConfig) => {
     cfg.presets = Array.isArray(cfg.presets) ? cfg.presets.slice() : [];
     const hasPreset = cfg.presets.some(p => {
@@ -151,13 +147,32 @@ log(`Using project root: ${ROOT}`);
       if (Array.isArray(p)) return p[0] === presetName;
       return false;
     });
-    if (!hasPreset) cfg.presets.unshift([presetName, presetConfig]);
+    if (!hasPreset) cfg.presets.push([presetName, presetConfig]);
+    return cfg;
+  };
+
+  // Important: preset-env's "exclude" must be strings/regex only
+  const sanitizePresetEnvExclude = (cfg) => {
+    if (!cfg.presets) return cfg;
+    cfg.presets = cfg.presets.map((p) => {
+      if (Array.isArray(p) && p[0] === '@babel/preset-env' && p[1] && typeof p[1] === 'object') {
+        const opt = { ...p[1] };
+        if (Array.isArray(opt.exclude)) {
+          opt.exclude = opt.exclude.filter(item =>
+            typeof item === 'string' ||
+            (item && typeof item === 'object' && typeof item.test === 'function')
+          );
+        }
+        return ['@babel/preset-env', opt];
+      }
+      return p;
+    });
     return cfg;
   };
 
   const typescriptPresent = hasAnyDep('typescript');
 
-  // 1) JSON-based configs (do not disturb existing presets/options)
+  // 1) JSON-based configs
   const jsonPaths = ['.babelrc', '.babelrc.json'].map(f => path.join(ROOT, f));
   for (const p of jsonPaths) {
     if (!exists(p)) continue;
@@ -166,18 +181,18 @@ log(`Using project root: ${ROOT}`);
     if (typescriptPresent) {
       cfg = ensurePresetInJSONCfg(cfg, '@babel/preset-typescript', { allowDeclareFields: true });
     }
+    cfg = sanitizePresetEnvExclude(cfg);
     cfg = addPluginToJSONCfg(cfg);
     writeJSON(p, cfg);
-    log(`Updated ${path.basename(p)}: ensured presets and ${PLUGIN_NAME}`);
+    log(`Updated ${path.basename(p)}: ensured presets and ${PLUGIN_NAME} (exclude sanitized)`);
     return;
   }
 
-  // 2) Code-based config present → edit conservatively
+  // 2) Code-based config present → edit conservatively (string ops, avoid touching "exclude")
   if (exists(targetPath)) {
     let src = read(targetPath);
     let changed = false;
 
-    // --- Inject ONLY into env.commonjs.plugins if present (Jest path) ---
     (function injectIntoCommonjsEnv() {
       let localChanged = false;
 
@@ -186,9 +201,7 @@ log(`Using project root: ${ROOT}`);
           const pluginsRx = /plugins\s*:\s*\[([\s\S]*?)\]/m;
           if (pluginsRx.test(body)) {
             body = body.replace(pluginsRx, (m, inner) => {
-              if (inner.includes(`'${PLUGIN_NAME}'`) || inner.includes(`"${PLUGIN_NAME}"`)) {
-                return m; // already present
-              }
+              if (inner.includes(`'${PLUGIN_NAME}'`) || inner.includes(`"${PLUGIN_NAME}"`)) return m;
               const trimmed = inner.trim();
               const hasTrailingComma = /,\s*$/.test(inner);
               const innerNoTrailWS = inner.replace(/\s*$/, '');
@@ -240,7 +253,7 @@ log(`Using project root: ${ROOT}`);
       }
     }
 
-    // 2b) Ensure @babel/preset-env exists
+    // 2b) Ensure @babel/preset-env exists (do not alter its "exclude")
     if (!/['"]@babel\/preset-env['"]/.test(src)) {
       const presetsRegex = /presets\s*:\s*\[/m;
       if (presetsRegex.test(src)) {
@@ -265,7 +278,7 @@ log(`Using project root: ${ROOT}`);
       changed = true;
     }
 
-    // 2c) If TypeScript is present, ensure @babel/preset-typescript exists
+    // 2c) If TypeScript is present, ensure @babel/preset-typescript exists (as a preset, not in exclude)
     if (typescriptPresent && !/['"]@babel\/preset-typescript['"]/.test(src)) {
       const presetsArrayRegex = /presets\s*:\s*\[([\s\S]*?)\]/m;
       if (presetsArrayRegex.test(src)) {
@@ -302,14 +315,14 @@ log(`Using project root: ${ROOT}`);
 
     if (changed) {
       writeIfChanged(targetPath, src);
-      log(`Updated ${path.basename(targetPath)}: ensured presets/plugins (incl. TS when present).`);
+      log(`Updated ${path.basename(targetPath)}: ensured presets/plugins (TS as preset; preset-env exclude untouched).`);
     } else {
       log(`${path.basename(targetPath)} already contains required presets/plugins.`);
     }
     return;
   }
 
-  // 3) No config found → create a minimal one (include TS preset if TS present)
+  // 3) No config found → minimal one
   const typescriptPresentMinimal = hasAnyDep('typescript');
   const minimal =
 `module.exports = {
@@ -329,33 +342,24 @@ log(`Using project root: ${ROOT}`);
 
 
 /* ----------------------------------------
- * 2) Jest wiring (ts-jest + Babel or babel-jest fallback)
+ * 2) Jest wiring
  * --------------------------------------*/
 (function ensureJest() {
   const freshPkg = readJSON(PKG_PATH) || {};
   const scriptsTest = String(freshPkg.scripts?.test || '');
   const jestReferenced = hasAnyDep('jest') || /(^|[\s;(&|])jest(\s|$)/.test(scriptsTest);
   if (!jestReferenced) {
-    log('Jest not detected (dependency or scripts.test) — skipping Jest wiring.');
+    log('Jest not detected — skipping Jest wiring.');
     return;
   }
 
   const hasTsJest = hasAnyDep('ts-jest');
   const usesTS = hasAnyDep('typescript') || hasTsJest || hasAnyDep('@types/jest');
 
-  if (!hasAnyDep('@babel/core')) {
-    log('Missing @babel/core for Jest/Babel.');
-    tryInstall(['@babel/core'], true);
-  }
-  if (!hasAnyDep('@babel/preset-env')) {
-    tryInstall(['@babel/preset-env'], true);
-  }
-  if (usesTS && !hasAnyDep('@babel/preset-typescript')) {
-    tryInstall(['@babel/preset-typescript'], true);
-  }
-  if (!hasAnyDep('jest-docblock')) {
-    tryInstall(['jest-docblock'], true);
-  }
+  if (!hasAnyDep('@babel/core')) tryInstall(['@babel/core'], true);
+  if (!hasAnyDep('@babel/preset-env')) tryInstall(['@babel/preset-env'], true);
+  if (usesTS && !hasAnyDep('@babel/preset-typescript')) tryInstall(['@babel/preset-typescript'], true);
+  if (!hasAnyDep('jest-docblock')) tryInstall(['jest-docblock'], true);
 
   const pkgHasInlineJest = !!freshPkg.jest && typeof freshPkg.jest === 'object';
 
@@ -384,13 +388,11 @@ log(`Using project root: ${ROOT}`);
       if (hasTsJest) {
         p.jest.transform = p.jest.transform || {};
         const tsKey = '^.+\\.ts$';
-        if (!p.jest.transform[tsKey]) {
-          p.jest.transform[tsKey] = 'ts-jest';
-        }
+        if (!p.jest.transform[tsKey]) p.jest.transform[tsKey] = 'ts-jest';
         p.jest.globals = p.jest.globals || {};
         const cur = p.jest.globals['ts-jest'] || {};
         p.jest.globals['ts-jest'] = Object.assign({}, cur, { babelConfig: true });
-        log('Enabled ts-jest → Babel pass via package.json jest.globals["ts-jest"].babelConfig');
+        log('Enabled ts-jest → Babel pass via package.json');
       } else {
         p.jest.transform = p.jest.transform || {};
         const KEY = '^.+\\.[jt]sx?$';
@@ -398,9 +400,7 @@ log(`Using project root: ${ROOT}`);
           p.jest.transform[KEY] = 'babel-jest';
           log('Set package.json jest.transform → babel-jest for JS/TS files');
         }
-        if (!hasAnyDep('babel-jest')) {
-          tryInstall(['babel-jest'], true);
-        }
+        if (!hasAnyDep('babel-jest')) tryInstall(['babel-jest'], true);
       }
       return p;
     });
@@ -422,7 +422,7 @@ log(`Using project root: ${ROOT}`);
       writeIfChanged(jestCfgPath, out);
       log(`Updated ${path.basename(jestCfgPath)} for ${hasTsJest ? 'ts-jest + Babel' : 'babel-jest'}`);
     } else {
-      log(`${path.basename(jestCfgPath)} present; not modifying user config. Make sure it enables Babel (ts-jest babelConfig or babel-jest).`);
+      log(`${path.basename(jestCfgPath)} present; not modifying user config.`);
     }
     return;
   }
@@ -447,26 +447,17 @@ module.exports = {
 })();
 
 /* ----------------------------------------
- * 3) Mocha wiring  (custom @babel/core require-hook) — Sails-safe
+ * 3) Mocha wiring (custom @babel/core require-hook) — Sails-safe
  * --------------------------------------*/
 (function ensureMocha() {
-  // Ensure minimum dev deps (auto-install only if JS_SANITIZER_AUTO_INSTALL=1)
   if (!hasAnyDep('@babel/core')) tryInstall(['@babel/core'], true);
   if (!hasAnyDep('@babel/preset-env')) tryInstall(['@babel/preset-env'], true);
-  if (!hasAnyDep('@babel/plugin-transform-modules-commonjs')) {
-    tryInstall(['@babel/plugin-transform-modules-commonjs'], true);
-  }
-  if (!hasAnyDep('jest-docblock')) {
-    tryInstall(['jest-docblock'], true);
-  }
+  if (!hasAnyDep('@babel/plugin-transform-modules-commonjs')) tryInstall(['@babel/plugin-transform-modules-commonjs'], true);
+  if (!hasAnyDep('jest-docblock')) tryInstall(['jest-docblock'], true);
 
-  // If the project actually uses TypeScript anywhere, having the TS preset is best.
   const tsPresent = hasAnyDep('typescript') || hasAnyDep('@types/mocha') || hasAnyDep('@types/node');
-  if (tsPresent && !hasAnyDep('@babel/preset-typescript')) {
-    tryInstall(['@babel/preset-typescript'], true);
-  }
+  if (tsPresent && !hasAnyDep('@babel/preset-typescript')) tryInstall(['@babel/preset-typescript'], true);
 
-  // Detect Sails-style projects (sails repo itself or apps using sails CLI)
   const freshPkg = readJSON(PKG_PATH) || {};
   const scriptsTest = String(freshPkg.scripts?.test || '');
   const IS_SAILS =
@@ -533,7 +524,7 @@ export async function load(url, context, nextLoad) {
 
   // 2) CJS bootstrap: require-hook + ESM loader registration
   const REGISTER_PATH = path.resolve(ROOT, 'babel.register.cjs');
-  const REGISTER_REL = './babel.register.cjs'; // use RELATIVE path for mocha -r / mocharc require
+  const REGISTER_REL = './babel.register.cjs';
 
   const registerSrc = String.raw`// Auto-generated by js-sanitizer
 // Custom require-hook using @babel/core (no @babel/register worker)
@@ -541,139 +532,148 @@ export async function load(url, context, nextLoad) {
 
 if (global.__JS_SANITIZER_HOOK__) {
   module.exports = global.__JS_SANITIZER_HOOK__;
-  return;
-}
-global.__JS_SANITIZER_HOOK__ = true;
+} else {
+  global.__JS_SANITIZER_HOOK__ = true;
 
-const fs = require('fs');
-const path = require('path');
-const Module = require('module');
+  const fs = require('fs');
+  const path = require('path');
+  const Module = require('module');
 
-let babel;
-try { babel = require('@babel/core'); }
-catch (e) {
-  console.warn('[js-sanitizer] Missing @babel/core. Install: npm i -D @babel/core');
-  throw e;
-}
-
-try { require('source-map-support/register'); } catch {}
-
-const EXTS = (process.env.JS_SANITIZER_EXTS || '.js,.jsx,.ts,.tsx,.cjs')
-  .split(',').map(s => s.trim()).filter(Boolean);
-
-function isIgnoredFile(filename) {
-  const lower = filename.toLowerCase();
-  const sep = path.sep;
-  if (lower.includes(sep + 'node_modules' + sep)) return true;
-  if (lower.includes(sep + 'dist' + sep)) return true;
-  if (lower.includes(sep + 'build' + sep)) return true;
-  if (lower.includes(sep + 'out' + sep)) return true;
-  if (lower.includes(sep + 'js-sanitizer' + sep)) return true;
-  if (/[\\/]\.(git|hg|svn)[\\/]/i.test(filename)) return true;
-  return false;
-}
-
-function isTestFixture(filename) {
-  if (!filename) return false;
-  const lower = filename.toLowerCase();
-  const sep = path.sep;
-  if (!lower.includes(sep + 'test' + sep)) return false;
-  if (lower.includes(sep + 'samples' + sep)) return true;
-  if (lower.includes(sep + 'fixtures' + sep)) return true;
-  const base = path.basename(lower);
-  if (/^(rollup|vite|webpack)\.config\.[cm]?[jt]sx?$/.test(base)) return true;
-  return false;
-}
-
-const BASE_OPTS = {
-  babelrc: true,
-  configFile: true,
-  rootMode: 'upward-optional',
-  comments: true,
-  sourceMaps: 'inline',
-  parserOpts: { allowReturnOutsideFunction: true, sourceType: 'unambiguous' },
-  caller: {
-    name: 'js-sanitizer',
-    version: '1',
-    supportsStaticESM: false,
-    supportsTopLevelAwait: false
-  },
-  ignore: [/node_modules[\\/](js-sanitizer)[\\/]/i]
-};
-
-const CACHE = new Map();
-
-function compileFile(code, filename) {
-  const key = filename + ':' + (fs.statSync(filename).mtimeMs | 0);
-  if (CACHE.has(key)) return CACHE.get(key);
-
-  const ext = path.extname(filename);
-  const opts = Object.assign({}, BASE_OPTS, { filename });
-
-  if (ext === '.ts' || ext === '.tsx') {
-    let tsPreset;
-    try { tsPreset = require.resolve('@babel/preset-typescript'); }
-    catch {
-      throw new Error(
-        '[js-sanitizer] TypeScript file "' + path.relative(process.cwd(), filename) + '" detected. ' +
-        'Please install @babel/preset-typescript: npm i -D @babel/preset-typescript'
-      );
-    }
-    opts.presets = [tsPreset];
+  let babel;
+  try { babel = require('@babel/core'); }
+  catch (e) {
+    console.warn('[js-sanitizer] Missing @babel/core. Install: npm i -D @babel/core');
+    throw e;
   }
 
-  const out = babel.transformSync(code, opts);
-  const result = out && out.code ? out.code : code;
-  CACHE.set(key, result);
-  return result;
-}
+  try { require('source-map-support/register'); } catch {}
 
-for (const ext of EXTS) {
-  const prior = Module._extensions[ext] || Module._extensions['.js'];
-  Module._extensions[ext] = function registerHook(mod, filename) {
-    if (isIgnoredFile(filename) || isTestFixture(filename)) {
-      return prior(mod, filename);
-    }
-    const src = fs.readFileSync(filename, 'utf8');
-    const compiled = compileFile(src, filename);
-    mod._compile(compiled, filename);
+  const SELF_PATH = __filename.toLowerCase();
+  const EXTS = (process.env.JS_SANITIZER_EXTS || '.js,.jsx,.ts,.tsx,.mjs,.cjs')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  function isIgnoredFile(filename) {
+    if (!filename) return true;
+    const lower = filename.toLowerCase();
+    const sep = path.sep;
+    if (lower === SELF_PATH) return true; // don't compile this bootstrap
+    if (lower.includes(sep + 'node_modules' + sep)) return true;
+    if (lower.includes(sep + 'dist' + sep)) return true;
+    if (lower.includes(sep + 'build' + sep)) return true;
+    if (lower.includes(sep + 'out' + sep)) return true;
+    if (lower.includes(sep + 'js-sanitizer' + sep)) return true;
+    if (/[\\/]\.(git|hg|svn)[\\/]/i.test(lower)) return true;
+    return false;
+  }
+
+  function isTestFixture(filename) {
+    if (!filename) return false;
+    const lower = filename.toLowerCase();
+    const sep = path.sep;
+    if (!lower.includes(sep + 'test' + sep)) return false;
+    if (lower.includes(sep + 'samples' + sep)) return true;
+    if (lower.includes(sep + 'fixtures' + sep)) return true;
+    const base = path.basename(lower);
+    if (/^(rollup|vite|webpack)\.config\.[cm]?[jt]sx?$/.test(base)) return true;
+    return false;
+  }
+
+  const BASE_OPTS = {
+    babelrc: true,
+    configFile: true,
+    rootMode: 'upward-optional',
+    comments: true,
+    sourceMaps: 'inline',
+    // Keep parsing sane; no top-level 'return' hacks
+    parserOpts: { sourceType: 'unambiguous' },
+    caller: {
+      name: 'js-sanitizer',
+      version: '1',
+      supportsStaticESM: false,
+      supportsTopLevelAwait: false
+    },
+    ignore: [/node_modules[\\/](js-sanitizer)[\\/]/i]
   };
-}
 
-console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
+  const CACHE = new Map();
 
-(async () => {
-  if (process.env.JS_SANITIZER_DISABLE_ESM_LOADER === '1') {
-    console.log('[js-sanitizer] ESM loader disabled via env');
-    return;
+  function compileFile(code, filename) {
+    const key = filename + ':' + (fs.statSync(filename).mtimeMs | 0);
+    if (CACHE.has(key)) return CACHE.get(key);
+
+    const ext = path.extname(filename);
+    const opts = Object.assign({}, BASE_OPTS, { filename });
+
+    if (ext === '.ts' || ext === '.tsx') {
+      let tsPreset;
+      try { tsPreset = require.resolve('@babel/preset-typescript'); }
+      catch {
+        throw new Error(
+          '[js-sanitizer] TypeScript file "' + path.relative(process.cwd(), filename) + '" detected. ' +
+          'Please install @babel/preset-typescript: npm i -D @babel/preset-typescript'
+        );
+      }
+      opts.presets = [tsPreset];
+    }
+
+    const out = babel.transformSync(code, opts);
+    const result = out && out.code ? out.code : code;
+    CACHE.set(key, result);
+    return result;
   }
-  try {
-    let register, pathToFileURL;
+
+  for (const ext of EXTS) {
+    const prior = Module._extensions[ext] || Module._extensions['.js'];
+    if (prior && prior.__js_sanitizer_patched) continue;
+
+    function registerHook(mod, filename) {
+      if (isIgnoredFile(filename) || isTestFixture(filename)) {
+        return prior(mod, filename);
+      }
+      const src = fs.readFileSync(filename, 'utf8');
+      const compiled = compileFile(src, filename);
+      mod._compile(compiled, filename);
+    }
+    registerHook.__js_sanitizer_patched = true;
+    Module._extensions[ext] = registerHook;
+  }
+
+  console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
+
+  (async () => {
+    if (process.env.JS_SANITIZER_DISABLE_ESM_LOADER === '1') {
+      console.log('[js-sanitizer] ESM loader disabled via env');
+      return;
+    }
     try {
-      ({ register } = require('node:module'));
-      ({ pathToFileURL } = require('node:url'));
-    } catch {
-      ({ register } = await import('node:module'));
-      ({ pathToFileURL } = await import('node:url'));
+      let register, pathToFileURL;
+      try {
+        ({ register } = require('node:module'));
+        ({ pathToFileURL } = require('node:url'));
+      } catch {
+        ({ register } = await import('node:module'));
+        ({ pathToFileURL } = await import('node:url'));
+      }
+      if (typeof register === 'function') {
+        const loaderFsPath = path.resolve(__dirname, 'sanitizer.esm.loader.mjs');
+        const loaderURL = pathToFileURL(loaderFsPath).href;
+        const parentURL = pathToFileURL(process.cwd() + path.sep).href;
+        register(loaderURL, parentURL);
+        console.log('[js-sanitizer] ESM loader registered');
+      } else {
+        console.warn('[js-sanitizer] node:module.register unavailable; ESM imports may bypass sanitizer');
+      }
+    } catch (e) {
+      console.warn('[js-sanitizer] Could not register ESM loader:', e && (e.message || e));
     }
-    if (typeof register === 'function') {
-      const loaderFsPath = path.resolve(__dirname, 'sanitizer.esm.loader.mjs');
-      const loaderURL = pathToFileURL(loaderFsPath).href;
-      const parentURL = pathToFileURL(process.cwd() + path.sep).href;
-      register(loaderURL, parentURL);
-      console.log('[js-sanitizer] ESM loader registered');
-    } else {
-      console.warn('[js-sanitizer] node:module.register unavailable; ESM imports may bypass sanitizer');
-    }
-  } catch (e) {
-    console.warn('[js-sanitizer] Could not register ESM loader:', e && (e.message || e));
-  }
-})();`;
+  })();
+}
+`;
 
   writeIfChanged(REGISTER_PATH, registerSrc);
   log('Ensured babel.register.cjs');
 
-  // 3) SAFE wiring: preserve existing bootstrap; avoid --extension for Sails/older Mocha
+  // 3) SAFE wiring: preserve bootstrap; avoid --extension for Sails/older Mocha; remove @babel/register duplicates
   function ensureMochaScripts(pkgPath, registerRel) {
     if (!exists(pkgPath)) return false;
     const pkg = readJSON(pkgPath) || {};
@@ -681,16 +681,25 @@ console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
     if (pkg.scripts && typeof pkg.scripts === 'object') {
       for (const [k, v] of Object.entries(pkg.scripts)) {
         if (typeof v !== 'string') continue;
-        if (!/\bmocha\b/.test(v)) continue; // don't touch `sails test` etc.
-        const hasOurRequire = new RegExp(`(?:^|\\s)-r\\s+${registerRel.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')}\\b`).test(v);
-        if (hasOurRequire) continue;
-        pkg.scripts[k] = v.replace(/\bmocha\b/, `mocha -r ${registerRel}`);
-        changed = true;
+        if (!/\bmocha\b/.test(v)) continue;
+        let next = v;
+
+        // remove any prior -r @babel/register to avoid double hooks
+        next = next.replace(/\s+-r\s+@babel\/register\b/g, '');
+        next = next.replace(/\s+--require\s+@babel\/register\b/g, '');
+
+        const hasOurRequire = new RegExp(`(?:^|\\s)(?:-r|--require)\\s+${registerRel.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')}\\b`).test(next);
+        if (!hasOurRequire) next = next.replace(/\bmocha\b/, `mocha -r ${registerRel}`);
+
+        if (next !== v) {
+          pkg.scripts[k] = next;
+          changed = true;
+        }
       }
     }
     if (changed) {
       writeJSON(pkgPath, pkg);
-      log(`package.json scripts patched (-r ${registerRel}).`);
+      log(`package.json scripts patched (-r ${registerRel}; removed @babel/register).`);
     } else {
       log('package.json scripts already OK or no mocha scripts found.');
     }
@@ -700,6 +709,10 @@ console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
   function patchJsonMochaConfig(jsonPath, registerRel, allowExtension) {
     const mocharc = exists(jsonPath) ? (readJSON(jsonPath) || {}) : {};
     const req = new Set(ensureArray(mocharc.require));
+    // drop @babel/register if present
+    for (const r of Array.from(req)) {
+      if (typeof r === 'string' && /@babel\/register\b/.test(r)) req.delete(r);
+    }
     req.add(registerRel);
     mocharc.require = Array.from(req);
 
@@ -710,14 +723,16 @@ console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
       mocharc.extension = Array.from(ext);
     }
     writeJSON(jsonPath, mocharc);
-    log(`${path.basename(jsonPath)} merged (require${allowExtension ? ' + extensions' : ''}).`);
+    log(`${path.basename(jsonPath)} merged (require${allowExtension ? ' + extensions' : ''}; removed @babel/register).`);
   }
 
   function patchMochaOpts(optsPath, registerRel, allowExtension) {
     let content = exists(optsPath) ? read(optsPath) : '';
     let lines = content.split(/\r?\n/);
 
-    // Remove any existing --extension lines if we shouldn't use them here
+    // strip any --require @babel/register lines
+    lines = lines.filter(l => !/^\s*(?:-r|--require)\s+@babel\/register\b/.test(l));
+
     if (!allowExtension) {
       lines = lines.filter(l => !/^\s*--extension\b/.test(l));
     }
@@ -742,13 +757,11 @@ console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
   const jsonRc = path.join(ROOT, '.mocharc.json');
   const hasJsonRc = exists(jsonRc);
 
-  // If there's a JS-based rc, don't edit it; patch package.json mocha scripts instead.
   if (jsRc) {
     ensureMochaScripts(PKG_PATH, REGISTER_REL);
   } else if (hasJsonRc) {
     patchJsonMochaConfig(jsonRc, REGISTER_REL, /*allowExtension*/ !IS_SAILS);
   } else {
-    // Try legacy mocha.opts locations
     const optsCandidates = [
       path.join(ROOT, 'test', 'mocha.opts'),
       path.join(ROOT, '.mocha.opts'),
@@ -758,7 +771,6 @@ console.log('[js-sanitizer] require-hook active for', EXTS.join(', '));
     if (foundOpts) {
       patchMochaOpts(foundOpts, REGISTER_REL, /*allowExtension*/ !IS_SAILS);
     } else {
-      // No rc/opts? Create minimal .mocharc.cjs (no "extension" for Sails/older Mocha)
       const NEW = path.join(ROOT, '.mocharc.cjs');
       const WANT_EXT = ['js','cjs','mjs','ts','tsx','jsx'];
       const content =
@@ -772,16 +784,13 @@ module.exports = {
     }
   }
 
-  // If we accidentally created test/mocha.opts earlier with --extension, the new logic above
-  // will remove those lines for Sails projects.
-  log('Mocha wiring complete (Sails-safe; no "--extension" CLI used).');
+  log('Mocha wiring complete (Sails-safe; no duplicate @babel/register; no invalid top-level return).');
 })();
 
 /* ----------------------------------------
- * 4) Vitest wiring (only if Vitest is actually used)
+ * 4) Vitest wiring
  * --------------------------------------*/
 (function ensureVitest() {
-  // Opt-out (useful for Mocha-only repos)
   if (process.env.JS_SANITIZER_SKIP_VITEST === '1') {
     log('Vitest wiring skipped (JS_SANITIZER_SKIP_VITEST=1).');
     return;
@@ -789,18 +798,14 @@ module.exports = {
 
   const fresh = readJSON(PKG_PATH) || {};
   const scriptsTest = String(fresh.scripts?.test || '');
-
-  // Detect Vitest usage
   const vitestInDeps = hasAnyDep('vitest');
   const vitestReferenced = vitestInDeps || /\bvitest\b/.test(scriptsTest);
 
-  // Only proceed if Vitest is detected or explicitly forced
   if (!vitestReferenced && process.env.JS_SANITIZER_VITEST_ALWAYS !== '1') {
     log('Vitest not detected — skipping Vitest wiring.');
     return;
   }
 
-  // From here on, Vitest is in use (or forced) → ensure setupFiles
   updatePkg((p) => {
     p.vitest = p.vitest || {};
     const s = new Set(ensureArray(p.vitest.setupFiles));
@@ -818,13 +823,11 @@ module.exports = {
     log('Created vitest.setup.js');
   }
 
-  // Optional plugin wiring only when Vitest is actually present
   if (!hasAnyDep('vite-plugin-babel')) {
     ensureDevDepInPkg('vite-plugin-babel', '*');
     tryInstall(['vite-plugin-babel'], true);
   }
 
-  // Respect existing Vitest configs; only generate a minimal one if none exist
   const existingCfg = [
     path.join(ROOT, 'vitest.config.ts'),
     path.join(ROOT, 'vitest.config.mjs'),
@@ -836,14 +839,13 @@ module.exports = {
     return;
   }
 
-  const outPath = path.join(ROOT, 'vitest.config.mjs'); // safe for ESM/CJS
+  const outPath = path.join(ROOT, 'vitest.config.mjs');
   const content = `// Auto-generated by js-sanitizer setup
 import { defineConfig } from 'vitest/config';
 import babel from 'vite-plugin-babel';
 
 export default defineConfig({
   plugins: [
-    // Only transform test/spec files; respect project Babel config
     babel({
       filter: /\\b(test|spec)\\.[cm]?[jt]sx?$/i,
       babelConfig: {
